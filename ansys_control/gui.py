@@ -38,6 +38,7 @@ from PySide6.QtWidgets import (
 
 from .config import MECHANICAL_EXE, OPTICSTUDIO_EXE, PROJECT_FILE, RUNWB2, WORKSPACE
 from .mechanical import (
+    MECHANICAL_DATABASE_SUFFIXES,
     find_project_mechdb,
     launch_mechanical_project_session,
     mechanical_session_port,
@@ -61,7 +62,7 @@ APP_NAME = "Windows端"
 APP_VERSION = "V26.5.10"
 APP_TITLE = f"{APP_NAME} {APP_VERSION}"
 MECHANICAL_REQUIRED_MESSAGE = (
-    "请先点击“打开 Mechanical”，用当前工程的 Mechanical database（.mechdb）启动 Mechanical。"
+    "请先点击“打开 Mechanical”，用当前工程的 Mechanical database（.mechdb/.mechdat）启动 Mechanical。"
     "读取设置、求解、读取结果和导出结果都只连接当前 Mechanical 会话，不再重新打开 Workbench。"
 )
 
@@ -869,7 +870,7 @@ class MainWindow(QMainWindow):
         project_layout.setSpacing(10)
 
         self.project_path_edit = QLineEdit(str(self.selected_project or ""))
-        self.project_path_edit.setPlaceholderText("选择 .wbpj 工程或 .mechdb database")
+        self.project_path_edit.setPlaceholderText("选择 .wbpj 工程或 .mechdb/.mechdat database")
         self.project_path_edit.setClearButtonEnabled(True)
         self.project_path_edit.editingFinished.connect(self.project_path_edited)
 
@@ -1083,7 +1084,7 @@ class MainWindow(QMainWindow):
             self,
             "选择 Ansys 工程或 Mechanical database",
             str(start_dir),
-            "Ansys Workbench / Mechanical Database (*.wbpj *.mechdb);;All Files (*)",
+            "Ansys Workbench / Mechanical Database (*.wbpj *.mechdb *.mechdat);;All Files (*)",
         )
         if not file_path:
             return
@@ -1105,13 +1106,13 @@ class MainWindow(QMainWindow):
             self.modules = []
             self.modules_table.setRowCount(0)
             if show_errors:
-                QMessageBox.warning(self, "未选择文件", "请先选择 Ansys Workbench 工程（.wbpj）或 Mechanical database（.mechdb）。")
+                QMessageBox.warning(self, "未选择文件", "请先选择 Ansys Workbench 工程（.wbpj）或 Mechanical database（.mechdb/.mechdat）。")
             return
-        if project.suffix.lower() == ".mechdb":
+        if project.suffix.lower() in MECHANICAL_DATABASE_SUFFIXES:
             modules = [
                 AnalysisModule(
                     index=1,
-                    system_name="MECHDB",
+                    system_name=project.suffix.lower().lstrip(".").upper(),
                     display_text="Mechanical Database",
                     system_type="Mechanical",
                     physics_type="",
@@ -1186,9 +1187,9 @@ class MainWindow(QMainWindow):
 
         project = self.current_project_path()
         if project is None:
-            QMessageBox.warning(self, "未选择文件", "请先选择 Ansys Workbench 工程（.wbpj）或 Mechanical database（.mechdb）。")
+            QMessageBox.warning(self, "未选择文件", "请先选择 Ansys Workbench 工程（.wbpj）或 Mechanical database（.mechdb/.mechdat）。")
             return
-        if project.suffix.lower() == ".mechdb" and not self.modules:
+        if project.suffix.lower() in MECHANICAL_DATABASE_SUFFIXES and not self.modules:
             self.load_analysis_modules(show_errors=False)
         module = self.selected_module()
         if module is None:
@@ -1546,9 +1547,9 @@ class MainWindow(QMainWindow):
             return
         project = self.current_project_path()
         if project is None:
-            QMessageBox.warning(self, "未选择文件", "请先选择 Ansys Workbench 工程（.wbpj）或 Mechanical database（.mechdb）。")
+            QMessageBox.warning(self, "未选择文件", "请先选择 Ansys Workbench 工程（.wbpj）或 Mechanical database（.mechdb/.mechdat）。")
             return
-        if project.suffix.lower() == ".mechdb" and not self.modules:
+        if project.suffix.lower() in MECHANICAL_DATABASE_SUFFIXES and not self.modules:
             self.load_analysis_modules(show_errors=False)
         module = self.selected_module()
         if module is None:

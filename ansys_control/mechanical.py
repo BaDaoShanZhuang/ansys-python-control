@@ -7,6 +7,9 @@ from pathlib import Path
 from .config import MECHANICAL_EXE, PROJECT_FILE, require_file
 
 
+MECHANICAL_DATABASE_SUFFIXES = {".mechdb", ".mechdat"}
+
+
 _SAVE_CURRENT_PROJECT_SCRIPT = r'''
 messages = []
 try:
@@ -31,13 +34,13 @@ def find_project_mechdb(project_file: str | Path | None = None) -> Path:
     elif PROJECT_FILE is not None:
         project = PROJECT_FILE
     else:
-        raise ValueError("请先选择 Ansys Workbench 工程文件（.wbpj）或 Mechanical database（.mechdb）。")
+        raise ValueError("请先选择 Ansys Workbench 工程文件（.wbpj）或 Mechanical database（.mechdb/.mechdat）。")
     project = require_file(project, "Workbench project or Mechanical database")
-    if project.suffix.lower() == ".mechdb":
+    if project.suffix.lower() in MECHANICAL_DATABASE_SUFFIXES:
         return project
     if project.suffix.lower() != ".wbpj":
         raise ValueError(
-            "请先选择已解包的 .wbpj 工程或 Mechanical database（.mechdb）；"
+            "请先选择已解包的 .wbpj 工程或 Mechanical database（.mechdb/.mechdat）；"
             f"当前文件不能用于 database 方式启动 Mechanical: {project}"
         )
 
@@ -45,9 +48,11 @@ def find_project_mechdb(project_file: str | Path | None = None) -> Path:
     if not files_dir.exists():
         raise FileNotFoundError(f"没有找到 Workbench 工程文件目录: {files_dir}")
 
-    mechdb_files = list(files_dir.rglob("*.mechdb"))
+    mechdb_files: list[Path] = []
+    for suffix in sorted(MECHANICAL_DATABASE_SUFFIXES):
+        mechdb_files.extend(files_dir.rglob(f"*{suffix}"))
     if not mechdb_files:
-        raise FileNotFoundError(f"没有在工程文件目录中找到 Mechanical .mechdb: {files_dir}")
+        raise FileNotFoundError(f"没有在工程文件目录中找到 Mechanical database（.mechdb/.mechdat）: {files_dir}")
 
     return max(mechdb_files, key=lambda path: (path.stat().st_mtime, path.stat().st_size))
 

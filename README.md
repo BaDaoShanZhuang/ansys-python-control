@@ -119,7 +119,7 @@ python scripts\run_app.py
 
 Current functions:
 
-- Select a `.wbpj` Workbench project path or a `.mechdb` Mechanical database file.
+- Select a `.wbpj` Workbench project path or a Mechanical database file (`.mechdb` / `.mechdat`).
 - Read and display the analysis modules already added to the selected project.
 - Open the selected module's current Mechanical analysis settings in a separate settings window, but only after the user has already opened the Mechanical project.
 - Read settings dynamically from the current Mechanical session's `AnalysisSettings.VisibleProperties`, so different analysis modules show different editable settings.
