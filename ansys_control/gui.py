@@ -42,6 +42,7 @@ from .mechanical import (
     find_project_mechdb,
     launch_mechanical_project_session,
     mechanical_session_port,
+    read_mechanical_database_analysis_modules,
     save_and_close_mechanical_session,
 )
 from .workbench import (
@@ -106,6 +107,38 @@ class StatusRow:
         self.name = name
         self.value = value
         self.ok = ok
+
+
+class ModuleLoadWorker(QObject):
+    finished = Signal(object)
+    failed = Signal(str)
+    progress = Signal(object)
+
+    def __init__(self, project: Path) -> None:
+        super().__init__()
+        self.project = project
+
+    @Slot()
+    def run(self) -> None:
+        try:
+            suffix = self.project.suffix.lower()
+            self.progress.emit(
+                {
+                    "stage": "读取分析模块",
+                    "status": f"正在读取 {self.project.name}",
+                }
+            )
+            if suffix in MECHANICAL_DATABASE_SUFFIXES:
+                modules = read_mechanical_database_analysis_modules(
+                    self.project,
+                    progress_callback=self.progress.emit,
+                )
+            else:
+                modules = read_project_analysis_modules(self.project)
+        except Exception as exc:
+            self.failed.emit(str(exc))
+        else:
+            self.finished.emit({"project": self.project, "modules": modules})
 
 
 class MechanicalOperationWorker(QObject):
@@ -824,6 +857,7 @@ class MainWindow(QMainWindow):
         self.pending_results_dialog: SolutionResultsDialog | None = None
         self.mechanical_session = None
         self.mechanical_port: int | None = None
+        self.module_load_show_errors = True
         self.operation_started_at: float | None = None
         self.operation_stage = "空闲"
         self.operation_status = "等待操作"
@@ -1101,6 +1135,10 @@ class MainWindow(QMainWindow):
         show_errors: bool = True,
     ) -> None:
         del checked
+        if self.active_thread is not None:
+            if show_errors:
+                QMessageBox.information(self, "操作正在执行", "当前操作还没有结束。")
+            return
         project = self.current_project_path()
         if project is None:
             self.modules = []
@@ -1108,31 +1146,51 @@ class MainWindow(QMainWindow):
             if show_errors:
                 QMessageBox.warning(self, "未选择文件", "请先选择 Ansys Workbench 工程（.wbpj）或 Mechanical database（.mechdb/.mechdat）。")
             return
-        if project.suffix.lower() in MECHANICAL_DATABASE_SUFFIXES:
-            modules = [
-                AnalysisModule(
-                    index=1,
-                    system_name=project.suffix.lower().lstrip(".").upper(),
-                    display_text="Mechanical Database",
-                    system_type="Mechanical",
-                    physics_type="",
-                    analysis_type="",
-                    solver_type="",
-                    directory_name=project.name,
-                    visible=True,
-                )
-            ]
-        else:
-            try:
-                modules = read_project_analysis_modules(project)
-            except Exception as exc:
-                self.modules_table.setRowCount(0)
-                if show_errors:
-                    self.report_error("读取分析模块失败", exc)
-                else:
-                    self.append_log(f"读取分析模块失败: {exc}")
-                return
 
+        self.module_load_show_errors = show_errors
+        self.modules = []
+        self.modules_table.setRowCount(0)
+        self.set_operation_buttons_enabled(False)
+        self.start_operation_status("读取分析模块", f"正在读取 {project}")
+        self.append_log(f"正在后台读取分析模块: {project}")
+
+        thread = QThread(self)
+        worker = ModuleLoadWorker(project)
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.progress.connect(self.update_operation_progress)
+        worker.finished.connect(self.module_load_finished)
+        worker.failed.connect(self.module_load_failed)
+        worker.finished.connect(thread.quit)
+        worker.failed.connect(thread.quit)
+        thread.finished.connect(worker.deleteLater)
+        thread.finished.connect(self.operation_thread_finished)
+        self.active_thread = thread
+        self.active_worker = worker
+        thread.start()
+
+    @Slot(object)
+    def module_load_finished(self, payload: object) -> None:
+        if isinstance(payload, dict):
+            modules = list(payload.get("modules") or [])
+            project = Path(str(payload.get("project") or self.current_project_path() or ""))
+        else:
+            modules = []
+            project = self.current_project_path() or Path("")
+
+        self.apply_analysis_modules(modules, project)
+        self.update_operation_progress({"stage": "模块读取完成", "status": f"{len(modules)} 个分析模块"})
+
+    @Slot(str)
+    def module_load_failed(self, message: str) -> None:
+        self.modules = []
+        self.modules_table.setRowCount(0)
+        self.append_log(f"读取分析模块失败: {message}")
+        self.update_operation_progress({"stage": "模块读取失败", "status": message})
+        if self.module_load_show_errors:
+            QMessageBox.critical(self, "读取分析模块失败", message)
+
+    def apply_analysis_modules(self, modules: list[AnalysisModule], project: Path) -> None:
         self.modules = modules
         self.modules_table.setRowCount(len(modules))
         for row_index, module in enumerate(modules):
@@ -1189,8 +1247,6 @@ class MainWindow(QMainWindow):
         if project is None:
             QMessageBox.warning(self, "未选择文件", "请先选择 Ansys Workbench 工程（.wbpj）或 Mechanical database（.mechdb/.mechdat）。")
             return
-        if project.suffix.lower() in MECHANICAL_DATABASE_SUFFIXES and not self.modules:
-            self.load_analysis_modules(show_errors=False)
         module = self.selected_module()
         if module is None:
             QMessageBox.warning(self, "未选择模块", "请先读取工程模块并选择一个分析模块。")
@@ -1549,8 +1605,6 @@ class MainWindow(QMainWindow):
         if project is None:
             QMessageBox.warning(self, "未选择文件", "请先选择 Ansys Workbench 工程（.wbpj）或 Mechanical database（.mechdb/.mechdat）。")
             return
-        if project.suffix.lower() in MECHANICAL_DATABASE_SUFFIXES and not self.modules:
-            self.load_analysis_modules(show_errors=False)
         module = self.selected_module()
         if module is None:
             QMessageBox.warning(self, "未选择模块", "请先读取工程模块并选择一个分析模块。")

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import socket
 import time
 from pathlib import Path
@@ -24,6 +25,56 @@ try:
 except Exception:
     pass
 "\n".join(messages)
+'''
+
+
+_READ_ANALYSES_SCRIPT = r'''
+import json
+
+def text(value):
+    try:
+        if value is None:
+            return ""
+        return str(value)
+    except Exception:
+        return ""
+
+def safe_get(obj, name):
+    try:
+        return getattr(obj, name)
+    except Exception:
+        return ""
+
+def safe_type(obj):
+    try:
+        return obj.GetType().FullName
+    except Exception:
+        return type(obj).__name__
+
+def analysis_record(index, analysis):
+    name = text(safe_get(analysis, "Name")).strip()
+    analysis_type = text(safe_get(analysis, "AnalysisType")).strip()
+    physics_type = text(safe_get(analysis, "PhysicsType")).strip()
+    solver_type = text(safe_get(analysis, "SolverType")).strip()
+    state = text(safe_get(analysis, "State")).strip()
+    type_name = safe_type(analysis)
+    display = name or analysis_type or ("Analysis " + str(index))
+    return {
+        "index": index,
+        "system_name": "MECH-" + str(index),
+        "display_text": display,
+        "system_type": type_name,
+        "physics_type": physics_type,
+        "analysis_type": analysis_type,
+        "solver_type": solver_type or state,
+        "directory_name": display,
+        "visible": True,
+    }
+
+model = ExtAPI.DataModel.Project.Model
+analyses = list(model.Analyses)
+records = [analysis_record(index + 1, analysis) for index, analysis in enumerate(analyses)]
+json.dumps(records)
 '''
 
 
@@ -55,6 +106,61 @@ def find_project_mechdb(project_file: str | Path | None = None) -> Path:
         raise FileNotFoundError(f"没有在工程文件目录中找到 Mechanical database（.mechdb/.mechdat）: {files_dir}")
 
     return max(mechdb_files, key=lambda path: (path.stat().st_mtime, path.stat().st_size))
+
+
+def read_mechanical_database_analysis_modules(
+    project_file: str | Path,
+    *,
+    progress_callback=None,
+) -> list:
+    """Read actual analysis modules from a Mechanical database file."""
+    from ansys.mechanical.core import launch_mechanical
+
+    from .workbench import AnalysisModule
+
+    mechanical_exe = require_file(MECHANICAL_EXE, "Mechanical executable")
+    mechdb = find_project_mechdb(project_file)
+    _emit_progress(progress_callback, "启动 Mechanical", f"后台读取 database 模块: {mechdb.name}")
+    session = launch_mechanical(
+        exec_file=str(mechanical_exe),
+        batch=True,
+        start_instance=True,
+        cleanup_on_exit=True,
+        clear_on_connect=False,
+        additional_switches=["-file", str(mechdb)],
+    )
+    try:
+        _emit_progress(progress_callback, "读取分析模块", "正在读取 Mechanical Model.Analyses")
+        raw = session.run_python_script(_READ_ANALYSES_SCRIPT)
+    finally:
+        try:
+            session.exit(force=False)
+        except Exception:
+            pass
+
+    try:
+        records = json.loads(str(raw or "[]"))
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"Mechanical 返回的分析模块数据不是有效 JSON: {raw}") from exc
+
+    modules = [
+        AnalysisModule(
+            index=int(record.get("index") or position),
+            system_name=str(record.get("system_name") or f"MECH-{position}"),
+            display_text=str(record.get("display_text") or f"Analysis {position}"),
+            system_type=str(record.get("system_type") or "Mechanical"),
+            physics_type=str(record.get("physics_type") or ""),
+            analysis_type=str(record.get("analysis_type") or ""),
+            solver_type=str(record.get("solver_type") or ""),
+            directory_name=str(record.get("directory_name") or ""),
+            visible=bool(record.get("visible", True)),
+        )
+        for position, record in enumerate(records, start=1)
+    ]
+    if not modules:
+        raise RuntimeError("当前 Mechanical database 中没有读取到分析模块。")
+    _emit_progress(progress_callback, "读取完成", f"已读取 {len(modules)} 个 Mechanical 分析模块")
+    return modules
 
 
 def launch_mechanical_session(*, batch: bool = True, cleanup_on_exit: bool = False):
@@ -159,6 +265,12 @@ def save_and_close_mechanical_session(
 
 
 def _emit_close_progress(progress_callback, stage: str, status: str) -> None:
+    if progress_callback is None:
+        return
+    progress_callback({"stage": stage, "status": status})
+
+
+def _emit_progress(progress_callback, stage: str, status: str) -> None:
     if progress_callback is None:
         return
     progress_callback({"stage": stage, "status": status})
