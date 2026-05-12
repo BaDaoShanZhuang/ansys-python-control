@@ -415,7 +415,6 @@ class AnalysisSettingsDialog(QDialog):
         root.addLayout(buttons)
 
         self.apply_result(result)
-        self.update_time_export_controls(False)
 
     def _build_control(self, setting: dict) -> QComboBox | QSpinBox | QLineEdit:
         kind = setting.get("kind", "text")
