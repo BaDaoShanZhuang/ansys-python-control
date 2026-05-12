@@ -1,0 +1,2 @@
+ansys-mechanical-core
+PySide6

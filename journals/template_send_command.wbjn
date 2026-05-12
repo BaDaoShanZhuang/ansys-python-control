@@ -1,0 +1,14 @@
+# encoding: utf-8
+SetScriptVersion(Version="12.1")
+
+system1 = GetSystem(Name="SYS")
+model1 = system1.GetContainer(ComponentName="Model")
+model1.Refresh()
+
+mechanical_script = r'''
+ExtAPI.Log.WriteMessage("Hello from ansys_python_control.")
+'''
+
+model1.SendCommand(Language="Python", Command=mechanical_script)
+model1.Exit()
+Save(FilePath=r"D:\260415\SYS-5_Mechanical.wbpj", Overwrite=True)

@@ -1,0 +1,15 @@
+[project]
+name = "ansys-python-control"
+version = "0.1.0"
+description = "Local Python automation helpers for Ansys Mechanical and Workbench."
+requires-python = ">=3.10,<3.12"
+dependencies = [
+  "ansys-mechanical-core",
+  "PySide6",
+]
+
+[project.scripts]
+ansys-control-app = "ansys_control.gui:main"
+
+[tool.setuptools]
+packages = ["ansys_control"]
