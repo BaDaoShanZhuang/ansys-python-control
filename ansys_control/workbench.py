@@ -472,7 +472,7 @@ def is_solution_result_object(obj, properties=None):
         return True
     props = properties or []
     prop_names = set([text(item.get("api_name", "")).lower() for item in props])
-    return bool({"minimum", "maximum", "average"} & prop_names)
+    return any(name in prop_names for name in ["minimum", "maximum", "average"])
 
 def collect_solution_results(solution):
     solution_results = []
@@ -536,34 +536,49 @@ def safe_get_or_call(obj, attr):
         pass
     return value
 
-def collect_result_sets(analysis):
+def collect_result_sets(analysis, solution=None):
     records = []
-    reader = None
-    try:
-        reader = analysis.GetResultsData()
-    except Exception as ex:
-        record("Result data reader unavailable: " + text(ex))
+    seen = set()
 
-    if reader is not None:
-        count = int_or_zero(safe_get_or_call(reader, "ResultSetCount"))
-        time_values = as_list(safe_get_or_call(reader, "ListTimeFreq"))
-        for index in range(count):
-            time_value = time_values[index] if index < len(time_values) else ""
-            records.append({{
-                "set_number": index + 1,
-                "time": text(time_value),
-                "label": result_set_label(index + 1, time_value),
-            }})
-        for close_name in ("Dispose", "Close"):
-            try:
-                getattr(reader, close_name)()
-                break
-            except Exception:
-                pass
+    def add_record(set_number, time_value):
+        set_number = int_or_zero(set_number) or 1
+        time_text = text(time_value).strip()
+        key = (set_number, time_text)
+        if key in seen:
+            return
+        seen.add(key)
+        records.append({{
+            "set_number": set_number,
+            "time": time_text,
+            "label": result_set_label(set_number, time_text),
+        }})
+
+    def visit_result_objects(obj, depth):
+        if depth > 6:
+            return
+        for child in object_children(obj):
+            set_number = safe_get(child, "SetNumber")
+            if text(set_number).startswith("ERR:") or text(set_number) in ("None", ""):
+                set_number = safe_get(child, "ResultNumber")
+            display_time = safe_get(child, "DisplayTime")
+            if not text(set_number).startswith("ERR:") or not text(display_time).startswith("ERR:"):
+                if text(set_number) not in ("", "None") or text(display_time) not in ("", "None"):
+                    add_record(set_number, display_time)
+            children = object_children(child)
+            if children:
+                visit_result_objects(child, depth + 1)
+
+    if solution is not None:
+        try:
+            visit_result_objects(solution, 0)
+        except Exception as ex:
+            record("Lightweight result-set collection failed: " + text(ex))
+
+    record("Skipped analysis.GetResultsData during read to avoid blocking Mechanical on database result loading.")
 
     if not records:
         records.append({{"set_number": 1, "time": "", "label": "Set 1"}})
-    return records
+    return sorted(records, key=lambda item: int_or_zero(item.get("set_number")))
 
 def result_set_label(set_number, time_value):
     time_text = text(time_value).strip()
@@ -812,7 +827,7 @@ def export_solution_outputs(analysis, solution, folder, write_text, write_images
     if not os.path.exists(folder):
         os.makedirs(folder)
     exported = []
-    existing_result_sets = result.get("result_sets") or collect_result_sets(analysis)
+    existing_result_sets = result.get("result_sets") or collect_result_sets(analysis, solution)
     result_sets = (
         build_export_result_sets(existing_result_sets, export_time_range)
         if export_all_sets
@@ -1128,12 +1143,13 @@ try:
     result["settings_after"], settings_records_after = collect_settings(settings)
     result["settings"] = settings_records_after
     result["conditions"] = collect_conditions(analysis)
-    result["result_sets"] = collect_result_sets(analysis)
     if include_results:
+        result["result_sets"] = collect_result_sets(analysis, solution)
         write_progress("读取求解结果", "正在读取 Solution 下的所有结果对象", analysis, solution)
         result["solution_results"] = collect_solution_results(solution)
     if export_text or export_images:
         if not result["solution_results"]:
+            result["result_sets"] = collect_result_sets(analysis, solution)
             write_progress("读取求解结果", "正在读取 Solution 下的所有结果对象", analysis, solution)
             result["solution_results"] = collect_solution_results(solution)
         write_progress("导出求解结果", "正在导出 TXT/图片文件", analysis, solution)
@@ -1144,7 +1160,7 @@ try:
         result["analysis_state"] = text(safe_get(analysis, "State"))
         result["solution_state"] = text(safe_get(solution, "State"))
         result["conditions"] = collect_conditions(analysis)
-        result["result_sets"] = collect_result_sets(analysis)
+        result["result_sets"] = collect_result_sets(analysis, solution)
         write_progress("读取求解结果", "正在读取求解完成后的结果对象", analysis, solution)
         result["solution_results"] = collect_solution_results(solution)
         if export_text or export_images:
