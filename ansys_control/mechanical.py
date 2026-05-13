@@ -143,7 +143,46 @@ def read_mechanical_database_analysis_modules(
     except json.JSONDecodeError as exc:
         raise RuntimeError(f"Mechanical 返回的分析模块数据不是有效 JSON: {raw}") from exc
 
-    modules = [
+    modules = _analysis_records_to_modules(records)
+    if not modules:
+        raise RuntimeError("当前 Mechanical database 中没有读取到分析模块。")
+    _emit_progress(progress_callback, "读取完成", f"已读取 {len(modules)} 个 Mechanical 分析模块")
+    return modules
+
+
+def read_current_mechanical_analysis_modules(
+    *,
+    port: int,
+    progress_callback=None,
+) -> list:
+    """Read actual analysis modules from the currently open Mechanical session."""
+    from ansys.mechanical.core import connect_to_mechanical
+
+    _emit_progress(progress_callback, "连接 Mechanical", f"正在连接当前 Mechanical 端口 {port}")
+    session = connect_to_mechanical(
+        port=port,
+        connect_timeout=8,
+        clear_on_connect=False,
+        cleanup_on_exit=False,
+    )
+    _emit_progress(progress_callback, "读取分析模块", "正在从当前 Mechanical 读取 Model.Analyses")
+    raw = session.run_python_script(_READ_ANALYSES_SCRIPT)
+    try:
+        records = json.loads(str(raw or "[]"))
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"Mechanical 返回的分析模块数据不是有效 JSON: {raw}") from exc
+
+    modules = _analysis_records_to_modules(records)
+    if not modules:
+        raise RuntimeError("当前 Mechanical 会话中没有读取到分析模块。")
+    _emit_progress(progress_callback, "读取完成", f"已读取 {len(modules)} 个 Mechanical 分析模块")
+    return modules
+
+
+def _analysis_records_to_modules(records: list[dict]) -> list:
+    from .workbench import AnalysisModule
+
+    return [
         AnalysisModule(
             index=int(record.get("index") or position),
             system_name=str(record.get("system_name") or f"MECH-{position}"),
@@ -157,10 +196,6 @@ def read_mechanical_database_analysis_modules(
         )
         for position, record in enumerate(records, start=1)
     ]
-    if not modules:
-        raise RuntimeError("当前 Mechanical database 中没有读取到分析模块。")
-    _emit_progress(progress_callback, "读取完成", f"已读取 {len(modules)} 个 Mechanical 分析模块")
-    return modules
 
 
 def launch_mechanical_session(*, batch: bool = True, cleanup_on_exit: bool = False):
@@ -213,10 +248,11 @@ def save_and_close_mechanical_session(
     mechanical=None,
     *,
     port: int | None = None,
+    save_project: bool = True,
     timeout_seconds: int = 45,
     progress_callback=None,
 ) -> dict:
-    """Save the current Mechanical project, then request a normal non-forced exit."""
+    """Save or discard the current Mechanical project, then close Mechanical."""
     session = mechanical
     session_port = port or mechanical_session_port(session)
 
@@ -243,20 +279,28 @@ def save_and_close_mechanical_session(
             cleanup_on_exit=False,
         )
 
-    _emit_close_progress(progress_callback, "保存 Mechanical", "正在保存当前 Mechanical 工程")
-    save_output = session.run_python_script(_SAVE_CURRENT_PROJECT_SCRIPT)
+    save_output = ""
+    if save_project:
+        _emit_close_progress(progress_callback, "保存 Mechanical", "正在保存当前 Mechanical 工程")
+        save_output = session.run_python_script(_SAVE_CURRENT_PROJECT_SCRIPT)
+    else:
+        _emit_close_progress(progress_callback, "关闭 Mechanical", "不保存当前 Mechanical 工程，正在关闭")
 
     _emit_close_progress(progress_callback, "关闭 Mechanical", "正在正常关闭 Mechanical（非强制）")
-    session.exit(force=False)
+    session.exit(force=not save_project)
 
     closed = _wait_for_mechanical_port_to_close(session_port, timeout_seconds)
-    if closed:
+    if closed and save_project:
         status = "已保存并正常关闭 Mechanical"
-    else:
+    elif closed:
+        status = "未保存并已关闭 Mechanical"
+    elif save_project:
         status = "已保存并发送正常关闭请求；Mechanical 可能仍在等待关闭确认"
+    else:
+        status = "已发送不保存关闭请求；Mechanical 可能仍在关闭中"
     _emit_close_progress(progress_callback, "关闭 Mechanical", status)
     return {
-        "saved": True,
+        "saved": save_project,
         "closed": closed,
         "port": session_port,
         "save_output": save_output,

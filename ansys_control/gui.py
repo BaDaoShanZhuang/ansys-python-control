@@ -42,6 +42,7 @@ from .mechanical import (
     find_project_mechdb,
     launch_mechanical_project_session,
     mechanical_session_port,
+    read_current_mechanical_analysis_modules,
     read_mechanical_database_analysis_modules,
     save_and_close_mechanical_session,
 )
@@ -114,9 +115,10 @@ class ModuleLoadWorker(QObject):
     failed = Signal(str)
     progress = Signal(object)
 
-    def __init__(self, project: Path) -> None:
+    def __init__(self, project: Path, port: int | None = None) -> None:
         super().__init__()
         self.project = project
+        self.port = port
 
     @Slot()
     def run(self) -> None:
@@ -128,7 +130,12 @@ class ModuleLoadWorker(QObject):
                     "status": f"正在读取 {self.project.name}",
                 }
             )
-            if suffix in MECHANICAL_DATABASE_SUFFIXES:
+            if self.port is not None:
+                modules = read_current_mechanical_analysis_modules(
+                    port=self.port,
+                    progress_callback=self.progress.emit,
+                )
+            elif suffix in MECHANICAL_DATABASE_SUFFIXES:
                 modules = read_mechanical_database_analysis_modules(
                     self.project,
                     progress_callback=self.progress.emit,
@@ -313,12 +320,14 @@ class MechanicalCloseWorker(QObject):
         self,
         session,
         port: int | None,
+        save_project: bool,
         project: Path | None = None,
         system_name: str | None = None,
     ) -> None:
         super().__init__()
         self.session = session
         self.port = port
+        self.save_project = save_project
         self.project = project
         self.system_name = system_name or ""
 
@@ -328,6 +337,7 @@ class MechanicalCloseWorker(QObject):
             result = save_and_close_mechanical_session(
                 self.session,
                 port=self.port,
+                save_project=self.save_project,
                 progress_callback=self.progress.emit,
             )
         except Exception as exc:
@@ -857,6 +867,7 @@ class MainWindow(QMainWindow):
         self.mechanical_session = None
         self.mechanical_port: int | None = None
         self.module_load_show_errors = True
+        self.load_modules_after_mechanical_launch = False
         self.operation_started_at: float | None = None
         self.operation_stage = "空闲"
         self.operation_status = "等待操作"
@@ -1125,7 +1136,9 @@ class MainWindow(QMainWindow):
         self.selected_project = Path(file_path)
         self.project_path_edit.setText(str(self.selected_project))
         self.refresh_status()
-        self.load_analysis_modules()
+        self.modules = []
+        self.modules_table.setRowCount(0)
+        self.open_mechanical(auto_load_modules=True)
 
     def load_analysis_modules(
         self,
@@ -1154,7 +1167,7 @@ class MainWindow(QMainWindow):
         self.append_log(f"正在后台读取分析模块: {project}")
 
         thread = QThread(self)
-        worker = ModuleLoadWorker(project)
+        worker = ModuleLoadWorker(project, self.mechanical_port)
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
         worker.progress.connect(self.update_operation_progress)
@@ -1543,6 +1556,9 @@ class MainWindow(QMainWindow):
         self.active_thread = None
         self.active_worker = None
         self.set_operation_buttons_enabled(True)
+        if self.load_modules_after_mechanical_launch:
+            self.load_modules_after_mechanical_launch = False
+            QTimer.singleShot(0, lambda: self.load_analysis_modules(show_errors=True))
 
     @Slot()
     def clear_settings_dialog(self) -> None:
@@ -1596,7 +1612,7 @@ class MainWindow(QMainWindow):
         ]
         return [StatusRow(name, str(value), ok) for name, value, ok in checks]
 
-    def open_mechanical(self) -> None:
+    def open_mechanical(self, auto_load_modules: bool = False) -> None:
         if self.active_thread is not None:
             QMessageBox.information(self, "操作正在执行", "当前操作还没有结束。")
             return
@@ -1604,22 +1620,27 @@ class MainWindow(QMainWindow):
         if project is None:
             QMessageBox.warning(self, "未选择文件", "请先选择 Ansys Workbench 工程（.wbpj）或 Mechanical database（.mechdb/.mechdat）。")
             return
-        module = self.selected_module()
-        if module is None:
-            QMessageBox.warning(self, "未选择模块", "请先读取工程模块并选择一个分析模块。")
+        if self.mechanical_port is not None:
+            self.append_log("当前已经有可连接的 Mechanical 会话。")
+            if auto_load_modules:
+                QTimer.singleShot(0, lambda: self.load_analysis_modules(show_errors=True))
             return
+        module = self.selected_module()
+        system_name = module.system_name if module is not None else "MECHANICAL"
+        display_text = module.display_text if module is not None else project.name
+        self.load_modules_after_mechanical_launch = auto_load_modules
         self.set_operation_buttons_enabled(False)
         self.start_operation_status(
             "启动 Mechanical",
-            f"正在用 database 打开 {module.system_name} / {module.display_text}",
+            f"正在打开 {display_text}",
         )
         self.append_log(
-            "正在后台用 Mechanical database 打开 Mechanical，"
-            f"工程={project}，模块={module.system_name} / {module.display_text}"
+            "选择工程后正在后台打开 Mechanical GUI，"
+            f"工程={project}，模块={system_name} / {display_text}"
         )
 
         thread = QThread(self)
-        worker = MechanicalLaunchWorker(project, module.system_name, module.display_text)
+        worker = MechanicalLaunchWorker(project, system_name, display_text)
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
         worker.progress.connect(self.update_operation_progress)
@@ -1652,6 +1673,7 @@ class MainWindow(QMainWindow):
 
     @Slot(str)
     def mechanical_launch_failed(self, message: str) -> None:
+        self.load_modules_after_mechanical_launch = False
         self.update_operation_progress({"stage": "打开 Mechanical 失败", "status": message})
         self.append_log(f"打开 Mechanical 失败: {message}")
         QMessageBox.critical(self, "打开 Mechanical 失败", message)
@@ -1669,24 +1691,34 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "操作正在执行", "当前操作还没有结束。")
             return
 
-        answer = QMessageBox.question(
-            self,
-            "关闭 Mechanical",
-            "将先保存当前 Mechanical database 工程，然后正常关闭 Mechanical。不会强制终止进程。继续？",
-            QMessageBox.Yes | QMessageBox.No,
-            QMessageBox.No,
-        )
-        if answer != QMessageBox.Yes:
+        dialog = QMessageBox(self)
+        dialog.setWindowTitle("关闭 Mechanical")
+        dialog.setText("关闭当前 Mechanical 工程前请选择是否保存。")
+        dialog.setInformativeText("选择“不保存关闭”会丢弃 Mechanical 中尚未保存的更改。")
+        save_button = dialog.addButton("保存后关闭", QMessageBox.AcceptRole)
+        discard_button = dialog.addButton("不保存关闭", QMessageBox.DestructiveRole)
+        cancel_button = dialog.addButton("取消", QMessageBox.RejectRole)
+        dialog.setDefaultButton(save_button)
+        dialog.exec()
+        clicked_button = dialog.clickedButton()
+        if clicked_button == cancel_button or clicked_button is None:
             return
+        save_project = clicked_button == save_button
 
         self.set_operation_buttons_enabled(False)
-        self.start_operation_status("关闭 Mechanical", "正在保存当前 Mechanical database 工程")
-        self.append_log("正在后台保存当前 Mechanical database 工程并正常关闭 Mechanical（非强制）")
+        status_text = (
+            "正在保存当前 Mechanical database 工程"
+            if save_project
+            else "正在不保存关闭当前 Mechanical database 工程"
+        )
+        self.start_operation_status("关闭 Mechanical", status_text)
+        self.append_log(status_text)
 
         thread = QThread(self)
         worker = MechanicalCloseWorker(
             self.mechanical_session,
             self.mechanical_port,
+            save_project,
             self.current_project_path(),
             "",
         )
@@ -1711,14 +1743,15 @@ class MainWindow(QMainWindow):
         if save_output:
             for line in save_output.splitlines():
                 self.append_log(f"Mechanical 保存: {line}")
-        status = str(result.get("status") or "已保存并发送正常关闭请求")
+        status = str(result.get("status") or "已发送关闭请求")
         self.update_operation_progress({"stage": "关闭 Mechanical", "status": status})
         self.append_log(status)
         if not result.get("closed"):
+            saved_text = "已保存当前 Mechanical database 工程" if result.get("saved") else "已请求不保存关闭当前 Mechanical database 工程"
             QMessageBox.information(
                 self,
                 "关闭 Mechanical",
-                "已保存当前 Mechanical database 工程，并发送正常关闭请求。如果 Mechanical 弹出确认窗口，请在 Mechanical 中确认关闭。程序不会强制终止进程。",
+                f"{saved_text}，并发送关闭请求。如果 Mechanical 弹出确认窗口，请在 Mechanical 中确认关闭。",
             )
 
     @Slot(str)
