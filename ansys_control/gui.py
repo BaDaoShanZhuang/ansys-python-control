@@ -46,7 +46,7 @@ from .mechanical import (
     read_mechanical_database_analysis_modules,
     save_and_close_mechanical_session,
 )
-from .workbench import (
+from .mechanical_ops import (
     AnalysisModule,
     ModuleOperationResult,
     export_current_solution_results,
@@ -909,12 +909,12 @@ class MainWindow(QMainWindow):
             self.load_analysis_modules(show_errors=False)
 
     def _build_project_group(self) -> QGroupBox:
-        project_group = QGroupBox("工程 / database")
+        project_group = QGroupBox("Mechanical database")
         project_layout = QHBoxLayout(project_group)
         project_layout.setSpacing(10)
 
         self.project_path_edit = QLineEdit(str(self.selected_project or ""))
-        self.project_path_edit.setPlaceholderText("选择 .wbpj 工程或 .mechdb/.mechdat database")
+        self.project_path_edit.setPlaceholderText("选择 .mechdb/.mechdat database")
         self.project_path_edit.setClearButtonEnabled(True)
         self.project_path_edit.editingFinished.connect(self.project_path_edited)
 
@@ -1126,9 +1126,9 @@ class MainWindow(QMainWindow):
         start_dir = current.parent if current is not None and current.parent.exists() else WORKSPACE
         file_path, _ = QFileDialog.getOpenFileName(
             self,
-            "选择 Ansys 工程或 Mechanical database",
+            "选择 Mechanical database",
             str(start_dir),
-            "Ansys Workbench / Mechanical Database (*.wbpj *.mechdb *.mechdat);;All Files (*)",
+            "Mechanical Database (*.mechdb *.mechdat);;All Files (*)",
         )
         if not file_path:
             return
@@ -1156,7 +1156,7 @@ class MainWindow(QMainWindow):
             self.modules = []
             self.modules_table.setRowCount(0)
             if show_errors:
-                QMessageBox.warning(self, "未选择文件", "请先选择 Ansys Workbench 工程（.wbpj）或 Mechanical database（.mechdb/.mechdat）。")
+                QMessageBox.warning(self, "未选择文件", "请先选择 Mechanical database（.mechdb/.mechdat）。")
             return
 
         self.module_load_show_errors = show_errors
@@ -1257,7 +1257,7 @@ class MainWindow(QMainWindow):
 
         project = self.current_project_path()
         if project is None:
-            QMessageBox.warning(self, "未选择文件", "请先选择 Ansys Workbench 工程（.wbpj）或 Mechanical database（.mechdb/.mechdat）。")
+            QMessageBox.warning(self, "未选择文件", "请先选择 Mechanical database（.mechdb/.mechdat）。")
             return
         module = self.selected_module()
         if module is None:
@@ -1618,7 +1618,7 @@ class MainWindow(QMainWindow):
             return
         project = self.current_project_path()
         if project is None:
-            QMessageBox.warning(self, "未选择文件", "请先选择 Ansys Workbench 工程（.wbpj）或 Mechanical database（.mechdb/.mechdat）。")
+            QMessageBox.warning(self, "未选择文件", "请先选择 Mechanical database（.mechdb/.mechdat）。")
             return
         if self.mechanical_port is not None:
             self.append_log("当前已经有可连接的 Mechanical 会话。")

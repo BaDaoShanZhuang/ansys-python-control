@@ -9,7 +9,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from ansys_control.config import PROJECT_FILE
-from ansys_control.workbench import open_workbench_mechanical, read_project_analysis_modules
+from ansys_control.mechanical_ops import open_workbench_mechanical, read_project_analysis_modules
 
 
 def main() -> int:

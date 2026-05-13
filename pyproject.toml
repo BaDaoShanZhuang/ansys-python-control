@@ -1,7 +1,7 @@
 [project]
 name = "ansys-python-control"
 version = "0.1.0"
-description = "Local Python automation helpers for Ansys Mechanical and Workbench."
+description = "Local desktop automation helpers for Ansys Mechanical database workflows."
 requires-python = ">=3.10,<3.12"
 dependencies = [
   "ansys-mechanical-core",

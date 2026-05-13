@@ -1,16 +1,16 @@
-# Ansys Python Control
+# Windows端
 
-This folder is the Python automation workspace for the local SYS-5 Ansys model.
+`Windows端 V26.5.10` is a local desktop controller for Ansys Mechanical and Zemax OpticStudio.
+
+The current main workflow uses Mechanical database files (`.mechdb` / `.mechdat`). After a database file is selected, the APP opens the current project in a visible Mechanical GUI, connects through PyMechanical, reads the analyses from that Mechanical session, and performs settings, solve, result-read, and export operations against the currently opened Mechanical session.
 
 ## Local paths
 
-- Workbench project: `D:\260415\SYS-5_Mechanical.wbpj`
-- Workbench launcher: `D:\Program Files\ANSYS Inc\v261\Framework\bin\Win64\RunWB2.exe`
 - Mechanical executable: `D:\Program Files\ANSYS Inc\v261\aisol\bin\winx64\AnsysWBU.exe`
 - Zemax OpticStudio executable: `D:\Program Files\ANSYS Inc\v261\Zemax OpticStudio\OpticStudio.exe`
-- PyCharm interpreter: `D:\anaconda\envs\zemax310\python.exe`
+- Python interpreter: `D:\anaconda\envs\zemax310\python.exe`
 
-## Install dependencies into the PyCharm interpreter
+## Install dependencies
 
 Run this from PowerShell or from the PyCharm terminal:
 
@@ -18,7 +18,7 @@ Run this from PowerShell or from the PyCharm terminal:
 & 'D:\260415\ansys_python_control\tools\install_dependencies.ps1'
 ```
 
-## Run the first checks
+## Run
 
 Check the configured interpreter and required packages:
 
@@ -32,105 +32,50 @@ Start the desktop APP:
 & 'D:\anaconda\envs\zemax310\python.exe' 'D:\260415\ansys_python_control\scripts\run_app.py'
 ```
 
-Open Mechanical through Workbench for the first analysis module:
-
-```powershell
-& 'D:\anaconda\envs\zemax310\python.exe' 'D:\260415\ansys_python_control\scripts\open_mechanical.py'
-```
-
-Open Mechanical through Workbench for a selected project and system:
-
-```powershell
-& 'D:\anaconda\envs\zemax310\python.exe' 'D:\260415\ansys_python_control\scripts\open_mechanical.py' 'D:\260415\20260505\SYS_20260424_Mechanical.wbpj' --system 'SYS 4'
-```
-
-List the analysis modules already added to a Workbench project:
-
-```powershell
-& 'D:\anaconda\envs\zemax310\python.exe' 'D:\260415\ansys_python_control\scripts\list_analysis_modules.py' 'D:\260415\20260505\SYS_20260424_Mechanical.wbpj'
-```
-
-Read the selected module's Mechanical analysis settings through Workbench:
-
-```powershell
-& 'D:\anaconda\envs\zemax310\python.exe' 'D:\260415\ansys_python_control\scripts\module_operation.py' read --system 'SYS'
-```
-
-Change settings on the selected module through Workbench:
-
-```powershell
-& 'D:\anaconda\envs\zemax310\python.exe' 'D:\260415\ansys_python_control\scripts\module_operation.py' update --system 'SYS' --set WeakSprings=Off --set SolverType=Direct --set SolverPivotChecking=Error
-```
-
-Solve the selected module through Workbench:
-
-```powershell
-& 'D:\anaconda\envs\zemax310\python.exe' 'D:\260415\ansys_python_control\scripts\module_operation.py' solve --system 'SYS'
-```
-
-`module_operation.py` and the APP operations execute through the selected Workbench system. Settings, solving, result reading, and result export all send commands through the Workbench `Model` container so Mechanical keeps the Workbench project context.
-
-Run an existing Workbench journal against the project:
-
-```powershell
-& 'D:\anaconda\envs\zemax310\python.exe' 'D:\260415\ansys_python_control\scripts\run_journal.py' 'D:\260415\create_cavity_outer_surface_named_selection.wbjn'
-```
-
-Run a Workbench journal against a selected project:
-
-```powershell
-& 'D:\anaconda\envs\zemax310\python.exe' 'D:\260415\ansys_python_control\scripts\run_journal.py' --project 'D:\260415\20260505\SYS_20260424_Mechanical.wbpj' 'D:\260415\20260505\name_cavity_outer_surfaces_for_heating.wbjn'
-```
-
-Test direct PyMechanical launch:
-
-```powershell
-& 'D:\anaconda\envs\zemax310\python.exe' 'D:\260415\ansys_python_control\scripts\pymechanical_smoke_test.py'
-```
-
-Inside PyCharm, use the same scripts directly because the project interpreter is already configured:
+Inside PyCharm, use the same interpreter:
 
 ```powershell
 python -m pip install -e .
 python scripts\check_environment.py
 python scripts\run_app.py
-python scripts\open_mechanical.py
-python scripts\list_analysis_modules.py D:\260415\20260505\SYS_20260424_Mechanical.wbpj
-python scripts\module_operation.py read --system SYS
-python scripts\run_journal.py D:\260415\create_cavity_outer_surface_named_selection.wbjn
-python scripts\pymechanical_smoke_test.py
 ```
-
-## Automation routes
-
-Use `scripts\run_journal.py` for the existing `.wbpj` workflow because Workbench owns the SYS-5 project file.
-
-Use `scripts\pymechanical_smoke_test.py` and `ansys_control\mechanical.py` when building direct PyMechanical automation. PyMechanical can launch Mechanical as a Python-controlled service and run Python inside Mechanical by calling `run_python_script`.
-
-The active workflow uses the PyCharm interpreter above.
 
 ## Desktop APP
 
-The first PySide6 desktop APP entry point is:
-
-```powershell
-python scripts\run_app.py
-```
-
 Current functions:
 
-- Select a `.wbpj` Workbench project path or a Mechanical database file (`.mechdb` / `.mechdat`).
-- Read and display the analysis modules already added to the selected project.
-- Open the selected module's current Mechanical analysis settings in a separate settings window, but only after the user has already opened the Mechanical project.
-- Read settings dynamically from the current Mechanical session's `AnalysisSettings.VisibleProperties`, so different analysis modules show different editable settings.
-- Read the selected analysis module's currently added analysis conditions, such as loads, supports, gravity, force, temperature, and thermal boundary conditions, from the current Mechanical tree.
-- Change and save the displayed Mechanical settings and editable analysis-condition properties from the settings window.
-- Clear the selected module's current generated solution data before solving it in the current Mechanical session.
-- Read the selected module's solve setup, analysis conditions, and all existing Solution result objects in a separate results window.
-- Export Solution result objects such as deformation and stress to TXT files and export the corresponding Mechanical result view images to PNG files.
-- Show the current operation stage, Mechanical status, and elapsed time in a right-side box next to the environment status while reading, saving, opening Mechanical, or solving.
-- Open Mechanical directly from the selected Mechanical database in a connectable Mechanical UI without blocking the APP while Mechanical starts.
-- Close the current Mechanical session after saving, without force-killing Workbench.
-- Open Ansys Zemax OpticStudio.
-- Close Zemax OpticStudio from the APP.
+- Select a Mechanical database file (`.mechdb` / `.mechdat`).
+- Open the selected database in a visible Mechanical GUI without blocking the APP.
+- Read analysis modules from the currently opened Mechanical session.
+- Open a settings window for the selected analysis module only after Mechanical is open.
+- Read editable Mechanical analysis settings dynamically from `AnalysisSettings.VisibleProperties`.
+- Read the selected module's analysis conditions, including loads, supports, force, temperature, gravity, and thermal boundary conditions.
+- Save changed settings and editable analysis-condition properties back to the current Mechanical session.
+- Clear the selected module's current generated solution data before solving.
+- Show solve stage, status, and elapsed time in the right-side operation-status panel.
+- Read solve setup, analysis conditions, and Solution result objects from the current module.
+- Export one selected Solution result to TXT, including time-range export when the result supports time/frequency sets.
+- Export the selected Mechanical result view image to PNG.
+- Close the current Mechanical session with a dialog that lets the user save, discard changes, or cancel.
+- Open and close Zemax OpticStudio.
 - Check local executable paths and required Python packages.
+
+## Code layout
+
+- `ansys_control\gui.py`: PySide6 desktop APP.
+- `ansys_control\mechanical.py`: Mechanical launch, connection, database discovery, and close/save helpers.
+- `ansys_control\mechanical_ops.py`: Mechanical operations, result export, and legacy Workbench-compatible operations.
+- `ansys_control\zemax.py`: Zemax OpticStudio launch helpers.
+
+## Legacy Workbench tools
+
+Some command-line scripts still exist for old `.wbpj` / `.wbpz` workflows:
+
+```powershell
+python scripts\list_analysis_modules.py D:\path\to\project.wbpj
+python scripts\open_mechanical.py D:\path\to\project.wbpj --system SYS
+python scripts\module_operation.py read --project D:\path\to\project.wbpj --system SYS
+python scripts\run_journal.py --project D:\path\to\project.wbpj D:\path\to\journal.wbjn
+```
+
+These are compatibility helpers only. The desktop APP workflow should use `.mechdb` / `.mechdat`.

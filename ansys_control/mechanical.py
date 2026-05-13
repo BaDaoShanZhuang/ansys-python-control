@@ -116,7 +116,7 @@ def read_mechanical_database_analysis_modules(
     """Read actual analysis modules from a Mechanical database file."""
     from ansys.mechanical.core import launch_mechanical
 
-    from .workbench import AnalysisModule
+    from .mechanical_ops import AnalysisModule
 
     mechanical_exe = require_file(MECHANICAL_EXE, "Mechanical executable")
     mechdb = find_project_mechdb(project_file)
@@ -180,7 +180,7 @@ def read_current_mechanical_analysis_modules(
 
 
 def _analysis_records_to_modules(records: list[dict]) -> list:
-    from .workbench import AnalysisModule
+    from .mechanical_ops import AnalysisModule
 
     return [
         AnalysisModule(
@@ -259,7 +259,7 @@ def save_and_close_mechanical_session(
     if session is None:
         from ansys.mechanical.core import connect_to_mechanical
 
-        from .workbench import _resolve_mechanical_port
+        from .mechanical_ops import _resolve_mechanical_port
 
         session_port = _resolve_mechanical_port(port)
         if session_port is None:
