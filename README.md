@@ -1,6 +1,6 @@
 # Windows端
 
-`Windows端 V26.5.10` is a local desktop controller for Ansys Mechanical and Zemax OpticStudio.
+`Windows端 V26.5.29` is a local desktop controller for Ansys Mechanical and Zemax OpticStudio.
 
 The current main workflow uses Mechanical database files (`.mechdb` / `.mechdat`). After a database file is selected, the APP opens the current project in a visible Mechanical GUI, connects through PyMechanical, reads the analyses from that Mechanical session, and performs settings, solve, result-read, and export operations against the currently opened Mechanical session.
 
@@ -57,7 +57,11 @@ Current functions:
 - Export one selected Solution result to TXT, including time-range export when the result supports time/frequency sets.
 - Export the selected Mechanical result view image to PNG.
 - Close the current Mechanical session with a dialog that lets the user save, discard changes, or cancel.
-- Open and close Zemax OpticStudio.
+- Select a Zemax `.zmx` project without opening the OpticStudio GUI.
+- Read Mechanical exported mirror/lens node results and calculate rigid-body position and rotation changes.
+- Import calculated lens pose changes into the selected non-sequential Zemax project through a background ZOS-API session.
+- Write Zemax lens poses as `original baseline + current Mechanical delta`, so repeated imports do not accumulate the same change.
+- Save or discard the program-managed background Zemax API session from the APP.
 - Check local executable paths and required Python packages.
 
 ## Code layout
@@ -65,7 +69,7 @@ Current functions:
 - `ansys_control\gui.py`: PySide6 desktop APP.
 - `ansys_control\mechanical.py`: Mechanical launch, connection, database discovery, and close/save helpers.
 - `ansys_control\mechanical_ops.py`: Mechanical operations, result export, and legacy Workbench-compatible operations.
-- `ansys_control\zemax.py`: Zemax OpticStudio launch helpers.
+- `ansys_control\zemax.py`: Zemax background ZOS-API import, Mechanical pose calculation, and baseline handling.
 
 ## Legacy Workbench tools
 

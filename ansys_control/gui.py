@@ -56,12 +56,17 @@ from .mechanical_ops import (
     solve_current_mechanical_analysis,
     update_current_mechanical_settings,
 )
-from .zemax import open_opticstudio
+from .zemax import (
+    calculate_pose_records_from_mechanical_exports,
+    close_managed_opticstudio_project,
+    import_lens_poses_to_current_opticstudio,
+    read_lens_pose_records,
+)
 
 
 ZEMAX_PROCESS_NAMES = ["OpticStudio.exe"]
 APP_NAME = "Windows端"
-APP_VERSION = "V26.5.10"
+APP_VERSION = "V26.5.29"
 APP_TITLE = f"{APP_NAME} {APP_VERSION}"
 MECHANICAL_REQUIRED_MESSAGE = (
     "请先点击“打开 Mechanical”，用当前工程的 Mechanical database（.mechdb/.mechdat）启动 Mechanical。"
@@ -81,7 +86,7 @@ def process_ids_by_name(process_names: list[str]) -> set[int]:
     command = (
         f"$names = @({quoted}); "
         "Get-Process -ErrorAction SilentlyContinue "
-        "| Where-Object { $names -contains $_.ProcessName } "
+        "| Where-Object { $names -contains $_.ProcessName -or $names -contains ($_.ProcessName + '.exe') } "
         "| Select-Object -ExpandProperty Id"
     )
     try:
@@ -344,6 +349,76 @@ class MechanicalCloseWorker(QObject):
             self.failed.emit(str(exc))
         else:
             self.finished.emit(result)
+
+
+class ZemaxPoseImportWorker(QObject):
+    finished = Signal(object)
+    failed = Signal(str)
+    progress = Signal(object)
+
+    def __init__(
+        self,
+        export_folder: Path,
+        zemax_project: Path,
+    ) -> None:
+        super().__init__()
+        self.export_folder = export_folder
+        self.zemax_project = zemax_project
+
+    @Slot()
+    def run(self) -> None:
+        try:
+            self.progress.emit(
+                {
+                    "stage": "Zemax 导入",
+                    "status": "正在后台打开所选 Zemax 工程并匹配 NSC Object Comment；导入后暂不保存",
+                }
+            )
+            result = import_lens_poses_to_current_opticstudio(
+                self.export_folder,
+                self.zemax_project,
+                save=False,
+            )
+        except Exception as exc:
+            self.failed.emit(str(exc))
+        else:
+            self.finished.emit(result)
+
+
+class ZemaxCloseWorker(QObject):
+    finished = Signal(object)
+    failed = Signal(str)
+    progress = Signal(object)
+
+    def __init__(
+        self,
+        project: Path | None,
+        save_project: bool,
+    ) -> None:
+        super().__init__()
+        self.project = project
+        self.save_project = save_project
+
+    @Slot()
+    def run(self) -> None:
+        try:
+            self.progress.emit(
+                {
+                    "stage": "关闭 Zemax",
+                    "status": "正在保存并关闭后台 Zemax API 会话" if self.save_project else "正在放弃未保存导入并关闭后台 Zemax API 会话",
+                }
+            )
+            managed_result = close_managed_opticstudio_project(self.project, save=self.save_project)
+        except Exception as exc:
+            self.failed.emit(str(exc))
+        else:
+            self.finished.emit(
+                {
+                    "managed": managed_result,
+                    "processes": [],
+                    "save_project": self.save_project,
+                }
+            )
 
 
 class AnalysisSettingsDialog(QDialog):
@@ -857,6 +932,10 @@ class MainWindow(QMainWindow):
         self.resize(1160, 780)
 
         self.selected_project: Path | None = PROJECT_FILE
+        self.selected_mechanical_export_folder: Path | None = None
+        self.selected_zemax_project: Path | None = None
+        self.current_zemax_info: dict[str, object] = {}
+        self.zemax_pose_records: list[dict[str, object]] = []
         self.modules: list[AnalysisModule] = []
         self.active_thread: QThread | None = None
         self.active_worker: QObject | None = None
@@ -883,16 +962,16 @@ class MainWindow(QMainWindow):
         title.setObjectName("titleLabel")
         root.addWidget(title)
 
-        splitter = QSplitter(Qt.Vertical)
-        splitter.setChildrenCollapsible(False)
-        root.addWidget(splitter, stretch=1)
+        body_splitter = QSplitter(Qt.Vertical)
+        body_splitter.setChildrenCollapsible(False)
+        root.addWidget(body_splitter, stretch=1)
 
-        splitter.addWidget(self._build_project_group())
-        splitter.addWidget(self._build_action_group())
-        splitter.addWidget(self._build_status_group())
-        splitter.addWidget(self._build_modules_group())
-        splitter.addWidget(self._build_log_group())
-        splitter.setSizes([90, 90, 170, 260, 170])
+        self.main_tabs = QTabWidget()
+        self.main_tabs.addTab(self._build_mechanical_tab(), "Mechanical")
+        self.main_tabs.addTab(self._build_zemax_tab(), "Zemax")
+        body_splitter.addWidget(self.main_tabs)
+        body_splitter.addWidget(self._build_log_group())
+        body_splitter.setSizes([600, 180])
 
         self.setCentralWidget(central)
         self._build_menu()
@@ -907,6 +986,40 @@ class MainWindow(QMainWindow):
         current_project = self.current_project_path()
         if current_project is not None and current_project.exists():
             self.load_analysis_modules(show_errors=False)
+
+    def _build_mechanical_tab(self) -> QWidget:
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+        layout.setContentsMargins(0, 0, 0, 0)
+
+        splitter = QSplitter(Qt.Vertical)
+        splitter.setChildrenCollapsible(False)
+        layout.addWidget(splitter)
+
+        splitter.addWidget(self._build_project_group())
+        splitter.addWidget(self._build_action_group())
+        splitter.addWidget(self._build_status_group())
+        splitter.addWidget(self._build_modules_group())
+        splitter.setSizes([90, 90, 170, 260])
+        return tab
+
+    def _build_zemax_tab(self) -> QWidget:
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(12)
+
+        splitter = QSplitter(Qt.Vertical)
+        splitter.setChildrenCollapsible(False)
+        layout.addWidget(splitter)
+
+        splitter.addWidget(self._build_zemax_project_group())
+        splitter.addWidget(self._build_zemax_action_group())
+        splitter.addWidget(self._build_zemax_mechanical_export_group())
+        splitter.addWidget(self._build_zemax_pose_import_group())
+        splitter.addWidget(self._build_zemax_status_group())
+        splitter.setSizes([90, 85, 85, 300, 130])
+        return tab
 
     def _build_project_group(self) -> QGroupBox:
         project_group = QGroupBox("Mechanical database")
@@ -931,6 +1044,24 @@ class MainWindow(QMainWindow):
         project_layout.addWidget(self.load_modules_button)
         return project_group
 
+    def _build_zemax_project_group(self) -> QGroupBox:
+        project_group = QGroupBox("Zemax 工程文件")
+        project_layout = QHBoxLayout(project_group)
+        project_layout.setSpacing(10)
+
+        self.zemax_project_path_edit = QLineEdit(str(self.selected_zemax_project or ""))
+        self.zemax_project_path_edit.setPlaceholderText("选择 .zmx/.zos/.zar/.zprj Zemax 工程文件")
+        self.zemax_project_path_edit.setClearButtonEnabled(True)
+        self.zemax_project_path_edit.editingFinished.connect(self.zemax_project_path_edited)
+
+        self.browse_zemax_project_button = QPushButton("选择文件")
+        self.browse_zemax_project_button.setIcon(self.style().standardIcon(QStyle.SP_DialogOpenButton))
+        self.browse_zemax_project_button.clicked.connect(self.browse_zemax_project)
+
+        project_layout.addWidget(self.zemax_project_path_edit, stretch=1)
+        project_layout.addWidget(self.browse_zemax_project_button)
+        return project_group
+
     def _build_action_group(self) -> QGroupBox:
         action_group = QGroupBox("启动")
         action_layout = QHBoxLayout(action_group)
@@ -944,25 +1075,115 @@ class MainWindow(QMainWindow):
         self.close_mechanical_button.setIcon(self.style().standardIcon(QStyle.SP_DialogCloseButton))
         self.close_mechanical_button.clicked.connect(self.close_mechanical)
 
-        self.open_zemax_button = QPushButton("打开 Zemax")
-        self.open_zemax_button.setIcon(self.style().standardIcon(QStyle.SP_DriveNetIcon))
-        self.open_zemax_button.clicked.connect(self.open_zemax)
-
-        self.close_zemax_button = QPushButton("关闭 Zemax")
-        self.close_zemax_button.setIcon(self.style().standardIcon(QStyle.SP_DialogCloseButton))
-        self.close_zemax_button.clicked.connect(self.close_zemax)
-
         self.check_button = QPushButton("检查环境")
         self.check_button.setIcon(self.style().standardIcon(QStyle.SP_BrowserReload))
         self.check_button.clicked.connect(self.refresh_status)
 
         action_layout.addWidget(self.open_mechanical_button)
         action_layout.addWidget(self.close_mechanical_button)
-        action_layout.addWidget(self.open_zemax_button)
-        action_layout.addWidget(self.close_zemax_button)
         action_layout.addStretch(1)
         action_layout.addWidget(self.check_button)
         return action_group
+
+    def _build_zemax_action_group(self) -> QGroupBox:
+        action_group = QGroupBox("Zemax 操作")
+        action_layout = QHBoxLayout(action_group)
+        action_layout.setSpacing(10)
+
+        self.close_zemax_button = QPushButton("关闭 Zemax")
+        self.close_zemax_button.setIcon(self.style().standardIcon(QStyle.SP_DialogCloseButton))
+        self.close_zemax_button.clicked.connect(self.close_zemax)
+
+        self.refresh_zemax_button = QPushButton("刷新状态")
+        self.refresh_zemax_button.setIcon(self.style().standardIcon(QStyle.SP_BrowserReload))
+        self.refresh_zemax_button.clicked.connect(self.update_zemax_status)
+
+        action_layout.addWidget(self.close_zemax_button)
+        action_layout.addStretch(1)
+        action_layout.addWidget(self.refresh_zemax_button)
+        return action_group
+
+    def _build_zemax_mechanical_export_group(self) -> QGroupBox:
+        export_group = QGroupBox("Mechanical 导出文件夹")
+        export_layout = QHBoxLayout(export_group)
+        export_layout.setSpacing(10)
+
+        self.mechanical_export_folder_edit = QLineEdit("")
+        self.mechanical_export_folder_edit.setPlaceholderText("选择包含镜片位移/旋转数据的 Mechanical 导出文件夹")
+        self.mechanical_export_folder_edit.setClearButtonEnabled(True)
+        self.mechanical_export_folder_edit.editingFinished.connect(self.mechanical_export_folder_edited)
+
+        self.browse_mechanical_export_button = QPushButton("选择文件夹")
+        self.browse_mechanical_export_button.setIcon(self.style().standardIcon(QStyle.SP_DirOpenIcon))
+        self.browse_mechanical_export_button.clicked.connect(self.browse_mechanical_export_folder)
+
+        self.load_pose_records_button = QPushButton("读取位姿")
+        self.load_pose_records_button.setIcon(self.style().standardIcon(QStyle.SP_FileDialogDetailedView))
+        self.load_pose_records_button.clicked.connect(self.load_zemax_pose_records)
+
+        export_layout.addWidget(self.mechanical_export_folder_edit, stretch=1)
+        export_layout.addWidget(self.browse_mechanical_export_button)
+        export_layout.addWidget(self.load_pose_records_button)
+        return export_group
+
+    def _build_zemax_pose_import_group(self) -> QGroupBox:
+        import_group = QGroupBox("非序列镜片位移/旋转导入")
+        layout = QVBoxLayout(import_group)
+
+        option_layout = QHBoxLayout()
+        target_label = QLabel("目标：后台 ZOS-API 打开的所选 Zemax 非序列工程（按 Comment 匹配）")
+        target_label.setWordWrap(True)
+
+        self.import_pose_button = QPushButton("导入到所选 Zemax")
+        self.import_pose_button.setIcon(self.style().standardIcon(QStyle.SP_DialogApplyButton))
+        self.import_pose_button.clicked.connect(self.import_mechanical_pose_to_zemax)
+
+        option_layout.addWidget(target_label, stretch=1)
+        option_layout.addStretch(1)
+        option_layout.addWidget(self.import_pose_button)
+        layout.addLayout(option_layout)
+
+        self.zemax_pose_table = QTableWidget(0, 8)
+        self.zemax_pose_table.setHorizontalHeaderLabels(["名称/Comment", "X", "Y", "Z", "Rx", "Ry", "Rz", "来源"])
+        self.zemax_pose_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.zemax_pose_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.zemax_pose_table.setAlternatingRowColors(True)
+        self.zemax_pose_table.verticalHeader().setVisible(False)
+        self.zemax_pose_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
+        self.zemax_pose_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
+        layout.addWidget(self.zemax_pose_table, stretch=1)
+
+        layout.addWidget(QLabel("重要日志 / 本地保存"))
+        self.zemax_pose_log = QPlainTextEdit()
+        self.zemax_pose_log.setReadOnly(True)
+        self.zemax_pose_log.setMaximumBlockCount(1000)
+        self.zemax_pose_log.setMinimumHeight(110)
+        layout.addWidget(self.zemax_pose_log, stretch=1)
+        return import_group
+
+    def _build_zemax_status_group(self) -> QGroupBox:
+        status_group = QGroupBox("Zemax 状态")
+        layout = QGridLayout(status_group)
+        layout.setColumnStretch(1, 1)
+
+        self.zemax_exe_status_label = QLabel("")
+        self.zemax_exe_status_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self.zemax_selected_project_label = QLabel("")
+        self.zemax_selected_project_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self.zemax_project_status_label = QLabel("")
+        self.zemax_project_status_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self.zemax_process_status_label = QLabel("")
+        self.zemax_process_status_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+
+        layout.addWidget(QLabel("OpticStudio"), 0, 0)
+        layout.addWidget(self.zemax_exe_status_label, 0, 1)
+        layout.addWidget(QLabel("选择工程"), 1, 0)
+        layout.addWidget(self.zemax_selected_project_label, 1, 1)
+        layout.addWidget(QLabel("当前工程"), 2, 0)
+        layout.addWidget(self.zemax_project_status_label, 2, 1)
+        layout.addWidget(QLabel("运行进程"), 3, 0)
+        layout.addWidget(self.zemax_process_status_label, 3, 1)
+        return status_group
 
     def _build_status_group(self) -> QWidget:
         container = QWidget()
@@ -1054,6 +1275,9 @@ class MainWindow(QMainWindow):
         browse_project_action = QAction("选择文件", self)
         browse_project_action.triggered.connect(self.browse_project)
 
+        browse_zemax_project_action = QAction("选择 Zemax 工程", self)
+        browse_zemax_project_action.triggered.connect(self.browse_zemax_project)
+
         load_modules_action = QAction("读取分析模块", self)
         load_modules_action.triggered.connect(self.load_analysis_modules)
 
@@ -1069,6 +1293,8 @@ class MainWindow(QMainWindow):
         file_menu = self.menuBar().addMenu("文件")
         file_menu.addAction(browse_project_action)
         file_menu.addAction(load_modules_action)
+        file_menu.addSeparator()
+        file_menu.addAction(browse_zemax_project_action)
         file_menu.addSeparator()
         file_menu.addAction(refresh_action)
         file_menu.addSeparator()
@@ -1121,6 +1347,26 @@ class MainWindow(QMainWindow):
         self.selected_project = self.current_project_path()
         self.refresh_status()
 
+    def current_mechanical_export_folder(self) -> Path | None:
+        text = self.mechanical_export_folder_edit.text().strip()
+        if text:
+            return Path(text)
+        return self.selected_mechanical_export_folder
+
+    def mechanical_export_folder_edited(self) -> None:
+        self.selected_mechanical_export_folder = self.current_mechanical_export_folder()
+
+    def current_zemax_project_path(self) -> Path | None:
+        text = self.zemax_project_path_edit.text().strip()
+        if text:
+            return Path(text)
+        return self.selected_zemax_project
+
+    def zemax_project_path_edited(self) -> None:
+        self.selected_zemax_project = self.current_zemax_project_path()
+        self.current_zemax_info = {}
+        self.update_zemax_status()
+
     def browse_project(self) -> None:
         current = self.current_project_path()
         start_dir = current.parent if current is not None and current.parent.exists() else WORKSPACE
@@ -1139,6 +1385,98 @@ class MainWindow(QMainWindow):
         self.modules = []
         self.modules_table.setRowCount(0)
         self.open_mechanical(auto_load_modules=True)
+
+    def browse_zemax_project(self) -> None:
+        current = self.current_zemax_project_path()
+        default_zemax_dir = WORKSPACE / "S_optical_model_SstageV8"
+        if current is not None and current.parent.exists():
+            start_dir = current.parent
+        elif default_zemax_dir.exists():
+            start_dir = default_zemax_dir
+        else:
+            start_dir = WORKSPACE
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "选择 Zemax 工程文件",
+            str(start_dir),
+            "Zemax Project (*.zmx *.zos *.zar *.zprj);;All Files (*)",
+        )
+        if not file_path:
+            return
+
+        self.selected_zemax_project = Path(file_path)
+        self.current_zemax_info = {}
+        self.zemax_project_path_edit.setText(str(self.selected_zemax_project))
+        self.update_zemax_status()
+        self.append_log(f"已选择 Zemax 工程: {self.selected_zemax_project}。不会打开 GUI；导入时通过后台 ZOS-API 打开。")
+
+    def browse_mechanical_export_folder(self) -> None:
+        current = self.current_mechanical_export_folder()
+        start_dir = current if current is not None and current.exists() else WORKSPACE
+        folder = QFileDialog.getExistingDirectory(
+            self,
+            "选择 Mechanical 导出文件夹",
+            str(start_dir),
+        )
+        if not folder:
+            return
+
+        self.selected_mechanical_export_folder = Path(folder)
+        self.mechanical_export_folder_edit.setText(str(self.selected_mechanical_export_folder))
+        self.load_zemax_pose_records()
+
+    def load_zemax_pose_records(self) -> None:
+        folder = self.current_mechanical_export_folder()
+        if folder is None:
+            QMessageBox.warning(self, "未选择文件夹", "请先选择 Mechanical 导出文件夹。")
+            return
+        try:
+            calculation = calculate_pose_records_from_mechanical_exports(folder)
+        except Exception as exc:
+            self.report_error("读取 Mechanical 位姿失败", exc)
+            return
+
+        records = [
+            record.as_dict()
+            for record in calculation.get("latest_records", [])
+            if hasattr(record, "as_dict")
+        ]
+        if not records:
+            try:
+                records = [record.as_dict() for record in read_lens_pose_records(folder)]
+            except Exception:
+                records = []
+        self.zemax_pose_records = records
+        self.populate_zemax_pose_table(self.zemax_pose_records)
+
+        log_lines = [str(line) for line in calculation.get("logs") or []]
+        saved_paths = calculation.get("saved_paths") or {}
+        if isinstance(saved_paths, dict) and saved_paths:
+            log_lines.append("本地保存文件:")
+            for label, path in saved_paths.items():
+                log_lines.append(f"  {label}: {path}")
+        self.set_zemax_pose_log(log_lines)
+        self.append_log(f"已从 Mechanical 原始导出文件计算 {len(records)} 条镜片位移/旋转记录: {folder}")
+
+    def set_zemax_pose_log(self, lines: list[str]) -> None:
+        self.zemax_pose_log.setPlainText("\n".join(lines))
+
+    def populate_zemax_pose_table(self, records: list[dict[str, object]]) -> None:
+        self.zemax_pose_table.setRowCount(len(records))
+        for row_index, record in enumerate(records):
+            values = [
+                str(record.get("name") or ""),
+                f"{float(record.get('x') or 0):.9g}",
+                f"{float(record.get('y') or 0):.9g}",
+                f"{float(record.get('z') or 0):.9g}",
+                f"{float(record.get('rx') or 0):.9g}",
+                f"{float(record.get('ry') or 0):.9g}",
+                f"{float(record.get('rz') or 0):.9g}",
+                str(record.get("source") or ""),
+            ]
+            for column, value in enumerate(values):
+                self.zemax_pose_table.setItem(row_index, column, QTableWidgetItem(value))
+        self.zemax_pose_table.resizeRowsToContents()
 
     def load_analysis_modules(
         self,
@@ -1323,8 +1661,12 @@ class MainWindow(QMainWindow):
             self.read_results_button,
             self.open_mechanical_button,
             self.close_mechanical_button,
-            self.open_zemax_button,
+            self.browse_zemax_project_button,
             self.close_zemax_button,
+            self.refresh_zemax_button,
+            self.browse_mechanical_export_button,
+            self.load_pose_records_button,
+            self.import_pose_button,
             self.check_button,
         ]:
             button.setEnabled(enabled)
@@ -1595,14 +1937,69 @@ class MainWindow(QMainWindow):
             self.status_layout.addWidget(value_label, row_index, 1)
             self.status_layout.addWidget(status_label, row_index, 2)
 
+        self.update_zemax_status()
         self.append_log("环境状态已刷新")
+
+    def update_zemax_status(self) -> None:
+        process_ids = sorted(process_ids_by_name(ZEMAX_PROCESS_NAMES))
+        process_text = "未运行" if not process_ids else ", ".join(str(pid) for pid in process_ids)
+
+        exe_status = str(OPTICSTUDIO_EXE)
+        if not OPTICSTUDIO_EXE.exists():
+            exe_status = f"{OPTICSTUDIO_EXE}（缺失）"
+
+        project_text = "未运行"
+        selected_project = self.current_zemax_project_path()
+        if selected_project is None:
+            selected_text = "未选择"
+        elif selected_project.exists():
+            selected_text = str(selected_project)
+        else:
+            selected_text = f"{selected_project}（不存在）"
+        if process_ids:
+            info = self.current_zemax_info if isinstance(self.current_zemax_info, dict) else {}
+            system_file = str(info.get("system_file") or "")
+            if selected_project is not None and system_file and not self._same_path(system_file, selected_project):
+                info = {}
+                self.current_zemax_info = {}
+            if info:
+                system_name = str(info.get("system_name") or "")
+                object_count = info.get("object_count")
+                instance = info.get("opticstudio_instance")
+                project_text = system_file or system_name or "已连接当前工程"
+                if object_count is not None:
+                    project_text = f"{project_text}（NSC 对象 {object_count} 个）"
+                if instance:
+                    project_text = f"{project_text}，后台 Instance={instance}"
+            else:
+                project_text = "检测到 OpticStudio 后台/外部进程，当前软件未连接工程"
+        else:
+            self.current_zemax_info = {}
+
+        self.zemax_exe_status_label.setText(exe_status)
+        self.zemax_selected_project_label.setText(selected_text)
+        self.zemax_project_status_label.setText(project_text)
+        self.zemax_process_status_label.setText(process_text)
+
+    def _same_path(self, left: str | Path, right: str | Path) -> bool:
+        try:
+            return Path(left).samefile(Path(right))
+        except Exception:
+            try:
+                return str(Path(left).resolve()).lower() == str(Path(right).resolve()).lower()
+            except Exception:
+                return str(left).strip().lower() == str(right).strip().lower()
 
     def collect_status(self) -> list[StatusRow]:
         project = self.current_project_path()
         project_value = str(project) if project is not None else "未选择"
         project_ok = bool(project is not None and project.exists())
+        zemax_project = self.current_zemax_project_path()
+        zemax_project_value = str(zemax_project) if zemax_project is not None else "未选择"
+        zemax_project_ok = bool(zemax_project is not None and zemax_project.exists())
         checks = [
             ("工程/database", project_value, project_ok),
+            ("Zemax 工程", zemax_project_value, zemax_project_ok),
             ("RunWB2", RUNWB2, RUNWB2.exists()),
             ("Mechanical", MECHANICAL_EXE, MECHANICAL_EXE.exists()),
             ("Zemax OpticStudio", OPTICSTUDIO_EXE, OPTICSTUDIO_EXE.exists()),
@@ -1678,13 +2075,135 @@ class MainWindow(QMainWindow):
         self.append_log(f"打开 Mechanical 失败: {message}")
         QMessageBox.critical(self, "打开 Mechanical 失败", message)
 
-    def open_zemax(self) -> None:
-        try:
-            process = open_opticstudio()
-        except Exception as exc:
-            self.report_error("打开 Zemax 失败", exc)
+    def import_mechanical_pose_to_zemax(self) -> None:
+        if self.active_thread is not None:
+            QMessageBox.information(self, "操作正在执行", "当前操作还没有结束。")
             return
-        self.append_log(f"已启动 Zemax OpticStudio，PID={process.pid}")
+        export_folder = self.current_mechanical_export_folder()
+        if export_folder is None:
+            QMessageBox.warning(self, "未选择文件夹", "请先选择 Mechanical 导出文件夹。")
+            return
+        zemax_project = self.current_zemax_project_path()
+        if zemax_project is None:
+            QMessageBox.warning(self, "未选择 Zemax 工程", "请先选择 Zemax 工程文件。")
+            return
+        if not zemax_project.exists():
+            QMessageBox.warning(self, "Zemax 工程不存在", f"所选 Zemax 工程文件不存在:\n{zemax_project}")
+            return
+
+        self.set_operation_buttons_enabled(False)
+        self.start_operation_status("Zemax 导入", "后台打开所选 Zemax 工程并写入位移/旋转")
+        self.append_log(
+            "开始通过后台 ZOS-API 导入 Mechanical 位移/旋转到所选 Zemax 非序列对象，"
+            f"Zemax 工程={zemax_project}，导出文件夹={export_folder}"
+        )
+
+        thread = QThread(self)
+        worker = ZemaxPoseImportWorker(
+            export_folder,
+            zemax_project,
+        )
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.progress.connect(self.update_operation_progress)
+        worker.finished.connect(self.zemax_pose_import_finished)
+        worker.failed.connect(self.zemax_pose_import_failed)
+        worker.finished.connect(thread.quit)
+        worker.failed.connect(thread.quit)
+        thread.finished.connect(worker.deleteLater)
+        thread.finished.connect(self.operation_thread_finished)
+        self.active_thread = thread
+        self.active_worker = worker
+        thread.start()
+
+    @Slot(object)
+    def zemax_pose_import_finished(self, result: object) -> None:
+        if not isinstance(result, dict):
+            result = {}
+        matched_count = int(result.get("matched_count") or 0)
+        unmatched_count = int(result.get("unmatched_count") or 0)
+        system_file = str(result.get("system_file") or "")
+        zemax_length_unit = str(result.get("zemax_length_unit") or "")
+        saved = bool(result.get("saved"))
+        save_error = str(result.get("save_error") or "")
+        baseline_file = str(result.get("baseline_file") or "")
+        baseline_source = str(result.get("baseline_source") or "")
+        baseline_created = bool(result.get("baseline_created"))
+        baseline_write_error = str(result.get("baseline_write_error") or "")
+        self.current_zemax_info = {
+            "system_file": system_file,
+            "launch_method": "standalone_background",
+        }
+        self.update_operation_progress(
+            {
+                "stage": "Zemax 导入完成",
+                "status": f"匹配 {matched_count} 个对象，未匹配 {unmatched_count} 条记录",
+            }
+        )
+        self.append_log(
+            "Zemax 非序列对象导入完成: "
+            f"匹配 {matched_count}，未匹配 {unmatched_count}，当前工程={system_file or '未命名工程'}，"
+            f"Zemax 长度单位={zemax_length_unit or '未知'}，"
+            f"保存={'成功' if saved else '未保存，关闭 Zemax 时再选择是否保存'}"
+        )
+        if baseline_file:
+            created_text = "新建" if baseline_created else "沿用"
+            self.append_log(f"Zemax 原始基准: {created_text} {baseline_file}，来源={baseline_source or '当前工程'}")
+        if baseline_write_error:
+            self.append_log(f"Zemax 原始基准保存失败: {baseline_write_error}")
+        for item in list(result.get("matched") or [])[:5]:
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get("comment") or item.get("name") or "")
+            old_values = item.get("old_values") or []
+            baseline_values = item.get("baseline_values") or old_values
+            raw_delta = item.get("raw_delta_values") or []
+            converted_delta = item.get("converted_delta_values") or []
+            new_values = item.get("new_values") or []
+            length_scale = item.get("length_scale")
+            if (
+                len(old_values) >= 6
+                and len(baseline_values) >= 6
+                and len(raw_delta) >= 6
+                and len(converted_delta) >= 6
+                and len(new_values) >= 6
+            ):
+                self.append_log(
+                    f"Zemax 导入明细 {name}: "
+                    f"位移换算 {item.get('mechanical_displacement_unit')} -> {item.get('zemax_length_unit')} "
+                    f"(x{float(length_scale or 1):.6g}); "
+                    f"原始位移=({float(raw_delta[0]):.6g}, {float(raw_delta[1]):.6g}, {float(raw_delta[2]):.6g})，"
+                    f"导入位移=({float(converted_delta[0]):.6g}, {float(converted_delta[1]):.6g}, {float(converted_delta[2]):.6g})，"
+                    f"基准位置=({float(baseline_values[0]):.9g}, {float(baseline_values[1]):.9g}, {float(baseline_values[2]):.9g})，"
+                    f"导入前位置=({float(old_values[0]):.9g}, {float(old_values[1]):.9g}, {float(old_values[2]):.9g})，"
+                    f"新位置=({float(new_values[0]):.9g}, {float(new_values[1]):.9g}, {float(new_values[2]):.9g})"
+                )
+        if save_error:
+            self.append_log(f"Zemax 当前工程保存失败: {save_error}")
+        if unmatched_count:
+            unmatched_names = [
+                str(item.get("name") or "")
+                for item in list(result.get("unmatched") or [])[:10]
+                if isinstance(item, dict)
+            ]
+            if unmatched_names:
+                self.append_log("未匹配名称示例: " + ", ".join(unmatched_names))
+        QMessageBox.information(
+            self,
+            "Zemax 导入完成",
+            "已导入镜片位移/旋转，但还没有保存 Zemax 工程。\n"
+            f"匹配: {matched_count}\n未匹配: {unmatched_count}\n"
+            f"当前工程: {system_file or '未命名工程'}\n"
+            f"Zemax 长度单位: {zemax_length_unit or '未知'}\n"
+            "保存: 未保存，点击“关闭 Zemax”时再选择保存或不保存。",
+        )
+        self.update_zemax_status()
+
+    @Slot(str)
+    def zemax_pose_import_failed(self, message: str) -> None:
+        self.update_operation_progress({"stage": "Zemax 导入失败", "status": message})
+        self.append_log(f"Zemax 非序列对象导入失败: {message}")
+        QMessageBox.critical(self, "Zemax 导入失败", message)
 
     def close_mechanical(self) -> None:
         if self.active_thread is not None:
@@ -1761,7 +2280,80 @@ class MainWindow(QMainWindow):
         QMessageBox.critical(self, "关闭 Mechanical 失败", message)
 
     def close_zemax(self) -> None:
-        self.close_process_group("Zemax OpticStudio", ZEMAX_PROCESS_NAMES)
+        if self.active_thread is not None:
+            QMessageBox.information(self, "操作正在执行", "当前操作还没有结束。")
+            return
+
+        dialog = QMessageBox(self)
+        dialog.setWindowTitle("关闭 Zemax")
+        dialog.setText("关闭当前后台 Zemax API 工程前请选择是否保存。")
+        dialog.setInformativeText(
+            "选择“保存后关闭”会保存本程序后台 ZOS-API 会话中的镜片位置/旋转修改；"
+            "选择“不保存关闭”会放弃这些未保存导入。此操作不会打开或关闭 Zemax GUI。"
+        )
+        save_button = dialog.addButton("保存后关闭", QMessageBox.AcceptRole)
+        discard_button = dialog.addButton("不保存关闭", QMessageBox.DestructiveRole)
+        cancel_button = dialog.addButton("取消", QMessageBox.RejectRole)
+        dialog.setDefaultButton(save_button)
+        dialog.exec()
+        clicked_button = dialog.clickedButton()
+        if clicked_button == cancel_button or clicked_button is None:
+            return
+        save_project = clicked_button == save_button
+
+        self.set_operation_buttons_enabled(False)
+        status_text = "正在保存并关闭后台 Zemax API 会话" if save_project else "正在不保存关闭后台 Zemax API 会话"
+        self.start_operation_status("关闭 Zemax", status_text)
+        self.append_log(status_text)
+
+        thread = QThread(self)
+        worker = ZemaxCloseWorker(
+            self.current_zemax_project_path(),
+            save_project,
+        )
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.progress.connect(self.update_operation_progress)
+        worker.finished.connect(self.zemax_close_finished)
+        worker.failed.connect(self.zemax_close_failed)
+        worker.finished.connect(thread.quit)
+        worker.failed.connect(thread.quit)
+        thread.finished.connect(worker.deleteLater)
+        thread.finished.connect(self.operation_thread_finished)
+        self.active_thread = thread
+        self.active_worker = worker
+        thread.start()
+
+    @Slot(object)
+    def zemax_close_finished(self, result: object) -> None:
+        if not isinstance(result, dict):
+            result = {}
+        managed = result.get("managed") if isinstance(result.get("managed"), dict) else {}
+        save_project = bool(result.get("save_project"))
+        saved_count = int(managed.get("saved_count") or 0)
+        closed_count = int(managed.get("closed_count") or 0)
+        matched_sessions = int(managed.get("matched_sessions") or 0)
+        errors = [str(item) for item in managed.get("errors") or []]
+        if save_project:
+            self.append_log(f"Zemax 后台 API 保存会话: 找到 {matched_sessions} 个程序控制会话，保存 {saved_count} 个，关闭 {closed_count} 个")
+        else:
+            self.append_log(f"Zemax 后台 API 放弃未保存导入: 找到 {matched_sessions} 个程序控制会话，关闭 {closed_count} 个")
+        if save_project and matched_sessions == 0:
+            self.append_log("未找到本程序创建的后台 ZOS-API 会话，当前没有可保存的 Zemax 后台工程。")
+        for error in errors:
+            self.append_log(f"Zemax 保存/关闭会话失败: {error}")
+
+        status = "Zemax 后台 API 会话已保存并关闭" if save_project else "Zemax 后台 API 会话已放弃未保存导入并关闭"
+        self.update_operation_progress({"stage": "关闭 Zemax", "status": status})
+        self.append_log(status)
+        self.update_zemax_status()
+
+    @Slot(str)
+    def zemax_close_failed(self, message: str) -> None:
+        self.update_operation_progress({"stage": "关闭 Zemax 失败", "status": message})
+        self.append_log(f"关闭 Zemax 失败: {message}")
+        QMessageBox.critical(self, "关闭 Zemax 失败", message)
+        self.update_zemax_status()
 
     def close_process_group(self, label: str, process_names: list[str]) -> None:
         answer = QMessageBox.question(
