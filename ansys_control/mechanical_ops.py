@@ -140,6 +140,7 @@ conditions_update = task.get("conditions_update") or []
 perform_solve = bool(task.get("perform_solve"))
 include_results = bool(task.get("include_results"))
 analysis_index = int(task.get("analysis_index") or 0)
+max_tabular_preview_rows = int(task.get("max_tabular_preview_rows") or 500)
 
 result = {{
     "project": task.get("project"),
@@ -165,6 +166,7 @@ result = {{
     "messages": [],
     "solved": False,
     "solve_method": "",
+    "solve_resources": {{}},
 }}
 
 def text(value):
@@ -239,6 +241,248 @@ def enum_options(value):
     except Exception:
         return []
 
+def is_text_like(value):
+    try:
+        unicode_type = unicode
+    except NameError:
+        unicode_type = str
+    try:
+        if isinstance(value, str) or isinstance(value, unicode_type):
+            return True
+    except Exception:
+        pass
+    return dotnet_type_name(value) == "System.String"
+
+def value_is_available(value):
+    value_text = text(value)
+    return bool(value_text and value_text != "None" and not value_text.startswith("ERR:"))
+
+def sequence_values(value, max_items):
+    if not value_is_available(value) or is_text_like(value):
+        return []
+    values = []
+    try:
+        count = int(value.Count)
+        for index in range(min(count, max_items)):
+            values.append(value[index])
+        return values
+    except Exception:
+        pass
+    try:
+        count = int(value.Length)
+        for index in range(min(count, max_items)):
+            values.append(value[index])
+        return values
+    except Exception:
+        pass
+    try:
+        for item in value:
+            values.append(item)
+            if len(values) >= max_items:
+                break
+        return values
+    except Exception:
+        return []
+
+def int_value(value, default=0):
+    try:
+        return int(value)
+    except Exception:
+        pass
+    try:
+        return int(float(text(value)))
+    except Exception:
+        return default
+
+def readable_attr(value, attrs):
+    for attr in attrs:
+        raw = safe_get(value, attr)
+        raw_text = text(raw).strip()
+        if value_is_available(raw_text):
+            return raw_text
+    return ""
+
+def variable_label(variable, fallback):
+    label = readable_attr(variable, ["Name", "DisplayName", "QuantityName", "Type"])
+    return label or fallback
+
+def variable_unit(variable):
+    return readable_attr(variable, ["Unit", "DisplayUnit", "CurrentUnit"])
+
+def unit_from_quantity_values(values):
+    for value in values:
+        value_text = text(value)
+        left = value_text.find("[")
+        right = value_text.rfind("]")
+        if left >= 0 and right > left:
+            return value_text[left + 1:right].strip()
+    return ""
+
+def variable_discrete_values(variable):
+    values = sequence_values(safe_get(variable, "DiscreteValues"), max_tabular_preview_rows + 1)
+    if values:
+        return values
+    values = sequence_values(safe_get(variable, "Values"), max_tabular_preview_rows + 1)
+    if values:
+        return values
+    values = sequence_values(safe_get(variable, "Data"), max_tabular_preview_rows + 1)
+    if values:
+        return values
+    formula = safe_get(variable, "Formula")
+    if value_is_available(formula):
+        return [formula]
+    return []
+
+def collect_field_tabular_data(api_name, display_name, field):
+    inputs = sequence_values(safe_get(field, "Inputs"), 40)
+    output = safe_get(field, "Output")
+    variables = []
+    for index, variable in enumerate(inputs):
+        variables.append(("input", index, variable))
+    if value_is_available(output):
+        variables.append(("output", 0, output))
+    if not variables:
+        return None
+
+    columns = []
+    values_by_column = []
+    row_count = 0
+    for column_index, variable_info in enumerate(variables):
+        role, variable_index, variable = variable_info
+        values = variable_discrete_values(variable)
+        values_by_column.append(values)
+        if len(values) > row_count:
+            row_count = len(values)
+        fallback = "Input " + text(variable_index + 1) if role == "input" else text(display_name or api_name)
+        unit_text = variable_unit(variable) or unit_from_quantity_values(values)
+        columns.append({{
+            "name": variable_label(variable, fallback),
+            "unit": unit_text,
+            "role": role,
+            "variable_index": variable_index,
+        }})
+
+    if row_count <= 0:
+        return None
+
+    rows = []
+    preview_count = min(row_count, max_tabular_preview_rows)
+    for row_index in range(preview_count):
+        row = []
+        for values in values_by_column:
+            if row_index < len(values):
+                row.append(text(values[row_index]))
+            elif len(values) == 1:
+                row.append(text(values[0]))
+            else:
+                row.append("")
+        rows.append(row)
+
+    return {{
+        "title": text(display_name or api_name),
+        "api_name": text(api_name),
+        "source": "Field.Inputs/Output",
+        "type": dotnet_type_name(field),
+        "columns": columns,
+        "rows": rows,
+        "row_count": row_count,
+        "truncated": row_count > max_tabular_preview_rows,
+        "editable": True,
+    }}
+
+def collect_table_object_data(api_name, display_name, table):
+    type_name = dotnet_type_name(table)
+    lower_type = type_name.lower()
+    column_names = sequence_values(safe_get(table, "ColumnNames"), 80)
+    row_count_value = safe_get(table, "RowCount")
+    row_count = int_value(row_count_value, 0)
+    if row_count <= 0:
+        row_count = int_value(safe_get(table, "Count"), 0)
+    if "tabular" not in lower_type and not column_names and row_count <= 0:
+        return None
+
+    columns = []
+    for index, name in enumerate(column_names):
+        columns.append({{
+            "name": text(name) or ("Column " + text(index + 1)),
+            "unit": "",
+            "role": "table",
+            "variable_index": index,
+        }})
+
+    rows = []
+    preview_count = min(row_count, max_tabular_preview_rows)
+    for row_index in range(preview_count):
+        row_obj = None
+        try:
+            row_obj = table.GetRow(row_index)
+        except Exception:
+            try:
+                row_obj = table.GetRow(row_index + 1)
+            except Exception:
+                row_obj = None
+        row_values = sequence_values(row_obj, 80)
+        if row_values:
+            if not columns:
+                for col_index in range(len(row_values)):
+                    columns.append({{
+                        "name": "Column " + text(col_index + 1),
+                        "unit": "",
+                        "role": "table",
+                        "variable_index": col_index,
+                    }})
+            rows.append([text(value) for value in row_values])
+
+    if not rows and not columns:
+        return None
+
+    return {{
+        "title": text(display_name or api_name),
+        "api_name": text(api_name),
+        "source": "TabularDataTable",
+        "type": type_name,
+        "columns": columns,
+        "rows": rows,
+        "row_count": row_count if row_count > 0 else len(rows),
+        "truncated": row_count > max_tabular_preview_rows,
+        "editable": False,
+    }}
+
+def collect_tabular_data(api_name, display_name, value, prop=None):
+    tables = []
+    field_table = collect_field_tabular_data(api_name, display_name, value)
+    if field_table is not None:
+        tables.append(field_table)
+
+    table_object = collect_table_object_data(api_name, display_name, value)
+    if table_object is not None:
+        tables.append(table_object)
+
+    for attr in ["TabularData", "Table", "TableAssignment", "InternalValue", "Value"]:
+        candidate = safe_get(value, attr)
+        table_object = collect_table_object_data(api_name, display_name, candidate)
+        if table_object is not None:
+            table_object["source"] = attr
+            tables.append(table_object)
+
+    if prop is not None:
+        for attr in ["TabularData", "Table", "InternalValue", "Value"]:
+            candidate = safe_get(prop, attr)
+            table_object = collect_table_object_data(api_name, display_name, candidate)
+            if table_object is not None:
+                table_object["source"] = "Property." + attr
+                tables.append(table_object)
+
+    unique = []
+    seen = set()
+    for table in tables:
+        key = text(table.get("source", "")) + "|" + text(table.get("type", "")) + "|" + text(table.get("row_count", ""))
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(table)
+    return unique
+
 def setting_kind(value, options):
     if options:
         return "enum"
@@ -275,21 +519,38 @@ def simple_editable(value, kind, value_text):
         return True
     return full_name == "System.String"
 
-def setting_record(api_name, display_name, value):
+def tabular_summary_text(tables, default_value):
+    if not tables:
+        return text(default_value)
+    if len(tables) == 1:
+        table = tables[0]
+        column_count = len(table.get("columns") or [])
+        row_count = int_value(table.get("row_count"), len(table.get("rows") or []))
+        return "Tabular Data (" + text(row_count) + " rows x " + text(column_count) + " columns)"
+    return "Tabular Data (" + text(len(tables)) + " tables)"
+
+def setting_record(api_name, display_name, value, prop=None):
     options = enum_options(value)
     kind = setting_kind(value, options)
     if kind == "bool":
         options = ["False", "True"]
     value_text = text(value)
-    return {{
+    tabular_data = collect_tabular_data(api_name, display_name, value, prop)
+    record_item = {{
         "api_name": text(api_name),
         "display_name": text(display_name or api_name),
-        "value": value_text,
+        "value": tabular_summary_text(tabular_data, value_text),
+        "raw_value": value_text,
         "kind": kind,
         "type": dotnet_type_name(value),
         "options": options,
         "editable": simple_editable(value, kind, value_text),
+        "tabular_data": tabular_data,
     }}
+    if tabular_data:
+        record_item["kind"] = "tabular"
+        record_item["editable"] = False
+    return record_item
 
 def collect_settings(settings):
     values = {{}}
@@ -306,7 +567,7 @@ def collect_settings(settings):
         if not api_name or api_name == "None" or api_name.startswith("ERR:"):
             continue
         value = safe_get(settings, api_name)
-        item = setting_record(api_name, display_name, value)
+        item = setting_record(api_name, display_name, value, prop)
         values[api_name] = item["value"]
         records.append(item)
 
@@ -325,7 +586,7 @@ def collect_visible_properties(obj):
         if not api_name or api_name == "None" or api_name.startswith("ERR:"):
             continue
         value = safe_get(obj, api_name)
-        item = setting_record(api_name, display_name, value)
+        item = setting_record(api_name, display_name, value, prop)
         records.append(item)
     return records
 
@@ -969,8 +1230,127 @@ def convert_setting_value(current_value, raw_value):
         return float(raw_value)
     return text(raw_value)
 
+def quantity_value_from_cell(cell_value, unit_text=""):
+    cell_text = text(cell_value).strip()
+    unit_text = text(unit_text or "").strip()
+    if cell_text == "":
+        return None
+    try:
+        if looks_quantity_text(cell_text):
+            return Quantity(cell_text)
+        if unit_text and "[" not in cell_text:
+            if unit_text.startswith("[") and unit_text.endswith("]"):
+                return Quantity(cell_text + " " + unit_text)
+            return Quantity(cell_text + " [" + unit_text + "]")
+        return Quantity(cell_text)
+    except Exception:
+        return text(cell_text)
+
+def set_variable_discrete_values(variable, role, values):
+    attempts = []
+    if role == "input":
+        attempts = [
+            ("SetDiscreteValuesForInput", lambda: variable.SetDiscreteValuesForInput(values)),
+            ("DiscreteValues", lambda: setattr(variable, "DiscreteValues", values)),
+        ]
+    else:
+        attempts = [
+            ("SetDiscreteValuesForOutput", lambda: variable.SetDiscreteValuesForOutput(values)),
+            ("DiscreteValues", lambda: setattr(variable, "DiscreteValues", values)),
+        ]
+    errors = []
+    for method_name, setter in attempts:
+        try:
+            setter()
+            return method_name
+        except Exception as ex:
+            errors.append(method_name + ": " + text(ex))
+    raise RuntimeError("; ".join(errors))
+
+def apply_field_tabular_data(owner, name, payload):
+    field = getattr(owner, name)
+    columns = payload.get("columns") or []
+    rows = payload.get("rows") or []
+    if not columns:
+        raise RuntimeError("Tabular Data 缺少列信息: " + text(name))
+    if not rows:
+        raise RuntimeError("Tabular Data 缺少行数据: " + text(name))
+    inputs = sequence_values(safe_get(field, "Inputs"), 80)
+    output = safe_get(field, "Output")
+    before_table = collect_field_tabular_data(name, name, field)
+    before_rows = int_value(before_table.get("row_count") if before_table else 0, 0)
+    changed_columns = 0
+    column_logs = []
+    for column_index, column in enumerate(columns):
+        if not isinstance(column, dict):
+            continue
+        role = text(column.get("role", ""))
+        variable_index = int_value(column.get("variable_index"), 0)
+        if role == "input":
+            if variable_index < 0 or variable_index >= len(inputs):
+                continue
+            variable = inputs[variable_index]
+        elif role == "output":
+            if not value_is_available(output):
+                continue
+            variable = output
+        else:
+            continue
+
+        unit_text = text(column.get("unit", ""))
+        values = []
+        for row in rows:
+            if column_index >= len(row):
+                continue
+            converted = quantity_value_from_cell(row[column_index], unit_text)
+            if converted is not None:
+                values.append(converted)
+        if not values:
+            continue
+        method_name = set_variable_discrete_values(variable, role, values)
+        changed_columns += 1
+        column_logs.append(
+            text(column.get("name", "Column " + text(column_index + 1)))
+            + "["
+            + role
+            + "] via "
+            + method_name
+            + " values="
+            + text(len(values))
+        )
+
+    if changed_columns <= 0:
+        raise RuntimeError("没有可写入的 Tabular Data 列: " + text(name))
+    verified = collect_field_tabular_data(name, name, field)
+    verified_rows = int_value(verified.get("row_count") if verified else 0, 0)
+    if verified_rows != len(rows):
+        raise RuntimeError(
+            "Tabular Data 写入后行数校验失败: "
+            + text(name)
+            + "，期望 "
+            + text(len(rows))
+            + " 行，Mechanical 当前为 "
+            + text(verified_rows)
+            + " 行"
+        )
+    record(
+        "SET TABULAR "
+        + text(name)
+        + " rows "
+        + text(before_rows)
+        + " -> "
+        + text(verified_rows)
+        + ", columns="
+        + text(changed_columns)
+        + ", "
+        + "; ".join(column_logs)
+    )
+
 def apply_setting(settings, name, value):
     if value in (None, "", "NoChange"):
+        return
+    if isinstance(value, dict) and text(value.get("kind", "")) == "tabular":
+        apply_field_tabular_data(settings, name, value)
         return
     current_value = getattr(settings, name)
     converted = convert_setting_value(current_value, value)
@@ -979,6 +1359,9 @@ def apply_setting(settings, name, value):
 
 def apply_object_property(obj, name, value):
     if value in (None, "", "NoChange"):
+        return
+    if isinstance(value, dict) and text(value.get("kind", "")) == "tabular":
+        apply_field_tabular_data(obj, name, value)
         return
     current_value = getattr(obj, name)
     converted = convert_setting_value(current_value, value)
@@ -995,6 +1378,8 @@ def apply_condition_updates(analysis, updates):
         child_path = text(update.get("path", ""))
         api_name = text(update.get("api_name", ""))
         value = update.get("value")
+        if text(update.get("kind", "")) == "tabular" and value is None:
+            value = update
         if not child_path or not api_name:
             continue
         child = objects_by_path.get(child_path)
@@ -1002,7 +1387,11 @@ def apply_condition_updates(analysis, updates):
             raise RuntimeError("没有找到分析条件: " + child_path)
         try:
             apply_object_property(child, api_name, value)
-            record("SET CONDITION " + child_path + "." + api_name + " = " + text(value))
+            if isinstance(value, dict) and text(value.get("kind", "")) == "tabular":
+                value_summary = "Tabular Data rows=" + text(len(value.get("rows") or []))
+            else:
+                value_summary = text(value)
+            record("SET CONDITION " + child_path + "." + api_name + " = " + value_summary)
         except Exception as ex:
             raise RuntimeError(
                 "设置分析条件失败: " + child_path + "." + api_name + " = " + text(value) + "; " + text(ex)
@@ -1090,8 +1479,127 @@ def clear_current_solution(analysis, solution):
             record(name + " failed: " + text(ex))
     record("No current solve data clear method completed.")
 
+def detected_cpu_core_count():
+    try:
+        import System
+        return max(1, int(System.Environment.ProcessorCount))
+    except Exception as ex:
+        record("System.Environment.ProcessorCount lookup failed: " + text(ex))
+    try:
+        cpu_count = getattr(os, "cpu_count", None)
+        if cpu_count is not None:
+            return max(1, int(cpu_count() or 1))
+    except Exception as ex:
+        record("os.cpu_count lookup failed: " + text(ex))
+    try:
+        import multiprocessing
+        return max(1, int(multiprocessing.cpu_count() or 1))
+    except Exception as ex:
+        record("multiprocessing.cpu_count lookup failed: " + text(ex))
+    return 1
+
+def configure_default_solve_resources(analysis, solution):
+    cpu_cores = detected_cpu_core_count()
+    resource_info = dict(
+        requested_cpu_cores=cpu_cores,
+        requested_gpu_device="NVIDIA",
+        requested_gpu_devices=1,
+        solve_configuration="",
+        configured=False,
+        settings=[],
+    )
+    result["solve_resources"] = resource_info
+    write_progress(
+        "配置求解资源",
+        "默认求解资源: CPU最大逻辑核心数=" + text(cpu_cores) + "，GPU=NVIDIA x 1",
+        analysis,
+        solution,
+    )
+
+    def record_setting(target_name, attr_name, requested_value, before_value, after_value, ok, error_text=""):
+        resource_info["settings"].append(dict(
+            target=target_name,
+            property=attr_name,
+            requested=text(requested_value),
+            before=text(before_value),
+            after=text(after_value),
+            status="ok" if ok else "failed",
+            error=text(error_text),
+        ))
+
+    def set_property(target, target_name, attr_name, requested_value):
+        try:
+            before_value = getattr(target, attr_name)
+        except Exception as ex:
+            record_setting(target_name, attr_name, requested_value, "", "", False, ex)
+            record("Solve resource setting skipped: " + target_name + "." + attr_name + " read failed: " + text(ex))
+            return False
+        try:
+            setattr(target, attr_name, requested_value)
+            after_value = getattr(target, attr_name)
+            record_setting(target_name, attr_name, requested_value, before_value, after_value, True)
+            record(
+                "Solve resource setting applied: "
+                + target_name + "." + attr_name
+                + " " + text(before_value) + " -> " + text(after_value)
+            )
+            return True
+        except Exception as ex:
+            record_setting(target_name, attr_name, requested_value, before_value, before_value, False, ex)
+            record("Solve resource setting failed: " + target_name + "." + attr_name + ": " + text(ex))
+            return False
+
+    config = None
+    try:
+        configs = ExtAPI.Application.SolveConfigurations
+        config = configs.DefaultConfiguration
+        resource_info["solve_configuration"] = text(safe_get(config, "Name")) or "DefaultConfiguration"
+        record("Using Mechanical default solve configuration: " + resource_info["solve_configuration"])
+    except Exception as ex:
+        record("Default solve configuration lookup failed: " + text(ex))
+
+    settings = None
+    if config is not None:
+        try:
+            settings = config.SolveProcessSettings
+        except Exception as ex:
+            record("SolveProcessSettings lookup failed: " + text(ex))
+
+    if settings is None:
+        try:
+            settings = solution.SolveProcessSite.SolveProcessSettings
+            resource_info["solve_configuration"] = text(safe_get(solution.SolveProcessSite, "Name")) or "Solution.SolveProcessSite"
+            record("Using solution SolveProcessSite settings: " + resource_info["solve_configuration"])
+        except Exception as ex:
+            record("Solution SolveProcessSite settings lookup failed: " + text(ex))
+
+    if settings is None:
+        record("No writable Solve Process Settings object was found; solve will use existing Mechanical defaults.")
+        return config
+
+    applied = False
+    applied = set_property(settings, "SolveProcessSettings", "DistributeSolution", True) or applied
+    applied = set_property(settings, "SolveProcessSettings", "MaxNumberOfCores", cpu_cores) or applied
+    applied = set_property(settings, "SolveProcessSettings", "HybridParallel", False) or applied
+    applied = set_property(settings, "SolveProcessSettings", "ThreadsPerProcess", 1) or applied
+    applied = set_property(settings, "SolveProcessSettings", "NumberOfProcesses", cpu_cores) or applied
+    applied = set_property(settings, "SolveProcessSettings", "GPUAccelerationDevice", "NVIDIA") or applied
+    applied = set_property(settings, "SolveProcessSettings", "NumberOfGPUDevices", 1) or applied
+    try:
+        if config is not None:
+            config.SetAsDefault()
+    except Exception as ex:
+        record("SetAsDefault after resource update skipped: " + text(ex))
+    resource_info["configured"] = bool(applied)
+    if applied:
+        record("Default solve resources requested: CPU cores=" + text(cpu_cores) + ", GPU=NVIDIA x 1")
+    else:
+        record("Default solve resources were not applied; Mechanical will use existing solve settings.")
+    return None
+
 def solve_analysis(analysis):
     clear_current_solution(analysis, analysis.Solution)
+    configure_default_solve_resources(analysis, analysis.Solution)
     write_progress("调用 Mechanical 求解", "Mechanical 正在求解，界面计时继续更新", analysis, analysis.Solution)
     attempts = [
         ("analysis.Solve", lambda: analysis.Solve()),
@@ -1557,8 +2065,40 @@ def run_current_mechanical_operation(
                 progress_callback,
             )
         except Exception as exc:
+            details = [f"PyMechanical 返回: {exc}"]
+            debug_dir = WORKSPACE / "tmp"
+            try:
+                debug_dir.mkdir(parents=True, exist_ok=True)
+            except Exception:
+                pass
+            if progress_path.exists():
+                try:
+                    progress_text = progress_path.read_text(encoding="utf-8", errors="ignore")
+                    (debug_dir / "last_current_mechanical_progress.json").write_text(
+                        progress_text,
+                        encoding="utf-8",
+                    )
+                    details.append(f"最后进度: {progress_text}")
+                except Exception:
+                    pass
+            if report_path.exists():
+                try:
+                    report_text = report_path.read_text(encoding="utf-8", errors="ignore")
+                    (debug_dir / "last_current_mechanical_report.json").write_text(
+                        report_text,
+                        encoding="utf-8",
+                    )
+                    report = json.loads(report_text)
+                    if report.get("error"):
+                        details.append("Mechanical 脚本错误:\n" + str(report.get("error")))
+                    operation_log = [str(item) for item in report.get("operation_log") or []]
+                    if operation_log:
+                        details.append("最近操作日志:\n" + "\n".join(operation_log[-20:]))
+                except Exception:
+                    details.append(f"报告文件已保存: {report_path}")
             raise RuntimeError(
-                "已连接到当前 Mechanical，但执行读取/保存脚本失败。"
+                "已连接到当前 Mechanical，但执行读取/保存脚本失败。\n\n"
+                + "\n\n".join(details)
             ) from exc
 
         if not report_path.exists():

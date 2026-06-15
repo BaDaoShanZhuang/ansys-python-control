@@ -11,19 +11,35 @@ from .config import MECHANICAL_EXE, PROJECT_FILE, require_file
 MECHANICAL_DATABASE_SUFFIXES = {".mechdb", ".mechdat"}
 
 
-_SAVE_CURRENT_PROJECT_SCRIPT = r'''
+def _save_current_project_script(project_file: str | Path | None = None) -> str:
+    target_path = str(project_file or "")
+    target_literal = repr(target_path)
+    return rf'''
 messages = []
+target_path = {target_literal}
 try:
     project = ExtAPI.DataModel.Project
-    project.Save()
-    messages.append("ExtAPI.DataModel.Project.Save: ok")
+    try:
+        messages.append("Project.FilePath before: " + str(project.FilePath))
+    except Exception as exc:
+        messages.append("Project.FilePath before: unavailable: " + str(exc))
+    try:
+        messages.append("ProjectDirectory: " + str(project.ProjectDirectory))
+    except Exception as exc:
+        messages.append("ProjectDirectory: unavailable: " + str(exc))
+    if target_path:
+        project.SaveAs(target_path, True)
+        messages.append("ExtAPI.DataModel.Project.SaveAs: ok -> " + target_path)
+        try:
+            messages.append("Project.FilePath after SaveAs: " + str(project.FilePath))
+        except Exception as exc:
+            messages.append("Project.FilePath after SaveAs: unavailable: " + str(exc))
+    else:
+        project.Save()
+        messages.append("ExtAPI.DataModel.Project.Save: ok")
 except Exception as exc:
-    messages.append("ExtAPI.DataModel.Project.Save: failed: " + str(exc))
+    messages.append("ExtAPI.DataModel.Project save failed: " + str(exc))
     raise
-try:
-    messages.append("ProjectDirectory: " + str(project.ProjectDirectory))
-except Exception:
-    pass
 "\n".join(messages)
 '''
 
@@ -215,14 +231,14 @@ def launch_mechanical_project_session(
     *,
     cleanup_on_exit: bool = False,
 ):
-    """Launch a visible, PyMechanical-connectable Mechanical session for a project."""
+    """Launch a background, PyMechanical-connectable Mechanical session for a project."""
     from ansys.mechanical.core import launch_mechanical
 
     mechanical_exe = require_file(MECHANICAL_EXE, "Mechanical executable")
     mechdb = find_project_mechdb(project_file)
     return launch_mechanical(
         exec_file=str(mechanical_exe),
-        batch=False,
+        batch=True,
         start_instance=True,
         cleanup_on_exit=cleanup_on_exit,
         clear_on_connect=False,
@@ -248,6 +264,7 @@ def save_and_close_mechanical_session(
     mechanical=None,
     *,
     port: int | None = None,
+    project_file: str | Path | None = None,
     save_project: bool = True,
     timeout_seconds: int = 45,
     progress_callback=None,
@@ -265,7 +282,7 @@ def save_and_close_mechanical_session(
         if session_port is None:
             raise RuntimeError(
                 "没有可连接的 Mechanical 会话，无法安全保存并关闭。"
-                "请先用本程序打开 Mechanical，或在 Mechanical 中手动保存后关闭。"
+                "请先用本程序启动后台 Mechanical，或在 Mechanical 中手动保存后关闭。"
             )
         _emit_close_progress(
             progress_callback,
@@ -282,18 +299,18 @@ def save_and_close_mechanical_session(
     save_output = ""
     if save_project:
         _emit_close_progress(progress_callback, "保存 Mechanical", "正在保存当前 Mechanical 工程")
-        save_output = session.run_python_script(_SAVE_CURRENT_PROJECT_SCRIPT)
+        save_output = session.run_python_script(_save_current_project_script(project_file))
     else:
-        _emit_close_progress(progress_callback, "关闭 Mechanical", "不保存当前 Mechanical 工程，正在关闭")
+        _emit_close_progress(progress_callback, "关闭 Mechanical", "不保存当前后台 Mechanical 工程，正在关闭")
 
-    _emit_close_progress(progress_callback, "关闭 Mechanical", "正在正常关闭 Mechanical（非强制）")
+    _emit_close_progress(progress_callback, "关闭 Mechanical", "正在正常关闭后台 Mechanical（非强制）")
     session.exit(force=not save_project)
 
     closed = _wait_for_mechanical_port_to_close(session_port, timeout_seconds)
     if closed and save_project:
-        status = "已保存并正常关闭 Mechanical"
+        status = "已保存并正常关闭后台 Mechanical"
     elif closed:
-        status = "未保存并已关闭 Mechanical"
+        status = "未保存并已关闭后台 Mechanical"
     elif save_project:
         status = "已保存并发送正常关闭请求；Mechanical 可能仍在等待关闭确认"
     else:

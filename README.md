@@ -2,7 +2,7 @@
 
 `Windows端 V26.5.29` is a local desktop controller for Ansys Mechanical and Zemax OpticStudio.
 
-The current main workflow uses Mechanical database files (`.mechdb` / `.mechdat`). After a database file is selected, the APP opens the current project in a visible Mechanical GUI, connects through PyMechanical, reads the analyses from that Mechanical session, and performs settings, solve, result-read, and export operations against the currently opened Mechanical session.
+The current main workflow uses Mechanical database files (`.mechdb` / `.mechdat`). After a database file is selected, the APP opens the current project in a background Mechanical session, connects through PyMechanical, reads the analyses from that Mechanical session, and performs settings, solve, result-read, and export operations against the current background Mechanical session.
 
 ## Local paths
 
@@ -45,7 +45,7 @@ python scripts\run_app.py
 Current functions:
 
 - Select a Mechanical database file (`.mechdb` / `.mechdat`).
-- Open the selected database in a visible Mechanical GUI without blocking the APP.
+- Open the selected database in a background Mechanical session without blocking the APP.
 - Read analysis modules from the currently opened Mechanical session.
 - Open a settings window for the selected analysis module only after Mechanical is open.
 - Read editable Mechanical analysis settings dynamically from `AnalysisSettings.VisibleProperties`.
@@ -61,6 +61,8 @@ Current functions:
 - Read Mechanical exported mirror/lens node results and calculate rigid-body position and rotation changes.
 - Import calculated lens pose changes into the selected non-sequential Zemax project through a background ZOS-API session.
 - Write Zemax lens poses as `original baseline + current Mechanical delta`, so repeated imports do not accumulate the same change.
+- Open a popup Zemax ray-trace/detector tab, clear all non-sequential Detector objects, run one background NSC ray trace with the current Zemax project's default ray-trace settings, then let the user select one Detector and export only that detector grid to CSV and pseudo-color PNG.
+- Detect the local logical CPU core count and set Zemax NSC Ray Trace `NumberOfCores` to all cores by default.
 - Save or discard the program-managed background Zemax API session from the APP.
 - Check local executable paths and required Python packages.
 
@@ -69,7 +71,7 @@ Current functions:
 - `ansys_control\gui.py`: PySide6 desktop APP.
 - `ansys_control\mechanical.py`: Mechanical launch, connection, database discovery, and close/save helpers.
 - `ansys_control\mechanical_ops.py`: Mechanical operations, result export, and legacy Workbench-compatible operations.
-- `ansys_control\zemax.py`: Zemax background ZOS-API import, Mechanical pose calculation, and baseline handling.
+- `ansys_control\zemax.py`: Zemax background ZOS-API import, Mechanical pose calculation, baseline handling, ray trace, and detector image export.
 
 ## Legacy Workbench tools
 
