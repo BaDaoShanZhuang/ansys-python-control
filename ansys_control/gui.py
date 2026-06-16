@@ -15,7 +15,7 @@ from pathlib import Path
 from xml.etree import ElementTree as ET
 
 from PySide6.QtCore import QObject, Qt, QThread, QTimer, Signal, Slot
-from PySide6.QtGui import QAction, QColor, QFont, QFontDatabase, QImage, QPainter, QPen, QPixmap, qRgb
+from PySide6.QtGui import QAction, QColor, QImage, QPainter, QPen, QPixmap, qRgb
 from PySide6.QtWidgets import (
     QApplication,
     QAbstractItemView,
@@ -130,6 +130,15 @@ class StatusRow:
         self.name = name
         self.value = value
         self.ok = ok
+
+
+def compact_status_value(value: str, max_chars: int = 52) -> str:
+    value = str(value).strip()
+    if len(value) <= max_chars:
+        return value
+    left = max_chars // 2 - 2
+    right = max_chars - left - 5
+    return f"{value[:left]} ... {value[-right:]}"
 
 
 class ModuleLoadWorker(QObject):
@@ -1935,14 +1944,6 @@ class MainWindow(QMainWindow):
         root.setContentsMargins(12, 12, 12, 14)
         root.setSpacing(10)
 
-        theme_label = QLabel("macOS 26 / Liquid Glass UI")
-        theme_label.setObjectName("themePill")
-        title_row = QHBoxLayout()
-        title_row.setContentsMargins(0, 0, 0, 0)
-        title_row.addStretch(1)
-        title_row.addWidget(theme_label)
-        root.addLayout(title_row)
-
         body_splitter = QSplitter(Qt.Vertical)
         body_splitter.setObjectName("bodySplitter")
         body_splitter.setChildrenCollapsible(False)
@@ -1977,7 +1978,7 @@ class MainWindow(QMainWindow):
         sidebar_layout.addWidget(self.zemax_nav_button)
         sidebar_layout.addStretch(1)
 
-        sidebar_hint = QLabel("Windows 软件\nmacOS 26 风格")
+        sidebar_hint = QLabel("Windows 软件")
         sidebar_hint.setObjectName("sidebarHint")
         sidebar_layout.addWidget(sidebar_hint)
 
@@ -2028,34 +2029,42 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(12)
 
-        layout.addWidget(self._build_project_toolbar())
-        layout.addWidget(self._build_status_group())
+        top_row = QWidget()
+        top_row_layout = QHBoxLayout(top_row)
+        top_row_layout.setContentsMargins(0, 0, 0, 0)
+        top_row_layout.setSpacing(12)
+        top_row_layout.addWidget(self._build_mechanical_console_panel(), stretch=1)
+        top_row_layout.addWidget(self._build_status_group())
+        layout.addWidget(top_row)
         layout.addWidget(self._build_modules_group(), stretch=1)
         return tab
+
+    def _build_mechanical_console_panel(self) -> QWidget:
+        panel = QWidget()
+        panel.setMinimumWidth(0)
+        panel.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(4)
+
+        title = QLabel("Mechanical 控制台")
+        title.setObjectName("toolbarTitle")
+        caption = QLabel("后台 Mechanical 会话 / database")
+        caption.setObjectName("toolbarCaption")
+        layout.addWidget(title)
+        layout.addWidget(caption)
+        layout.addWidget(self._build_project_toolbar())
+        return panel
 
     def _build_project_toolbar(self) -> QWidget:
         toolbar = QWidget()
         toolbar.setObjectName("projectToolbar")
         toolbar.setMinimumWidth(0)
         toolbar.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
+        toolbar.setMaximumWidth(620)
         toolbar_layout = QVBoxLayout(toolbar)
-        toolbar_layout.setContentsMargins(14, 12, 14, 12)
-        toolbar_layout.setSpacing(8)
-
-        header_row = QHBoxLayout()
-        header_row.setContentsMargins(0, 0, 0, 0)
-        header_row.setSpacing(10)
-        title_column = QVBoxLayout()
-        title_column.setContentsMargins(0, 0, 0, 0)
-        title_column.setSpacing(2)
-
-        title = QLabel("Mechanical 控制台")
-        title.setObjectName("toolbarTitle")
-        caption = QLabel("后台 Mechanical 会话 / database")
-        caption.setObjectName("toolbarCaption")
-        title_column.addWidget(title)
-        title_column.addWidget(caption)
-        header_row.addLayout(title_column)
+        toolbar_layout.setContentsMargins(9, 6, 9, 6)
+        toolbar_layout.setSpacing(5)
 
         self.project_path_edit = QLineEdit(str(self.selected_project or ""))
         self.project_path_edit.setObjectName("pathField")
@@ -2084,19 +2093,21 @@ class MainWindow(QMainWindow):
         self.close_mechanical_button.setIcon(self.style().standardIcon(QStyle.SP_DialogCloseButton))
         self.close_mechanical_button.clicked.connect(self.close_mechanical)
 
-        header_row.addWidget(self.check_button)
-        header_row.addWidget(self.close_mechanical_button)
-        header_row.addStretch(1)
-        toolbar_layout.addLayout(header_row)
-
         file_row = QHBoxLayout()
         file_row.setContentsMargins(0, 0, 0, 0)
-        file_row.setSpacing(10)
+        file_row.setSpacing(6)
         file_row.addWidget(self.project_path_edit, stretch=1)
         file_row.addWidget(self.browse_project_button)
         file_row.addWidget(self.load_modules_button)
-        file_row.addStretch(1)
         toolbar_layout.addLayout(file_row)
+
+        action_row = QHBoxLayout()
+        action_row.setContentsMargins(0, 0, 0, 0)
+        action_row.setSpacing(6)
+        action_row.addStretch(1)
+        action_row.addWidget(self.check_button)
+        action_row.addWidget(self.close_mechanical_button)
+        toolbar_layout.addLayout(action_row)
         return toolbar
 
     def _build_zemax_tab(self) -> QWidget:
@@ -2476,13 +2487,16 @@ class MainWindow(QMainWindow):
 
     def _build_status_group(self) -> QGroupBox:
         status_group = QGroupBox("环境状态")
-        status_group.setMinimumWidth(0)
-        status_group.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
+        status_group.setMinimumWidth(620)
+        status_group.setMaximumWidth(820)
+        status_group.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
         self.status_layout = QGridLayout(status_group)
-        self.status_layout.setContentsMargins(8, 8, 8, 8)
+        self.status_layout.setContentsMargins(8, 7, 8, 7)
         self.status_layout.setHorizontalSpacing(6)
-        self.status_layout.setVerticalSpacing(2)
+        self.status_layout.setVerticalSpacing(1)
+        self.status_layout.setColumnStretch(0, 0)
         self.status_layout.setColumnStretch(1, 1)
+        self.status_layout.setColumnStretch(2, 0)
         return status_group
 
     def _build_operation_group(self) -> QGroupBox:
@@ -2607,9 +2621,6 @@ class MainWindow(QMainWindow):
     def _apply_style(self) -> None:
         style = """
             QWidget {
-                font-family: "SF Pro Text", "Noto Sans SC", "Microsoft YaHei UI", "Segoe UI Variable Text", "Segoe UI", Arial;
-                font-size: 10.5pt;
-                font-weight: 500;
                 color: #172033;
                 selection-background-color: #0a84ff;
                 selection-color: #ffffff;
@@ -2621,8 +2632,6 @@ class MainWindow(QMainWindow):
             }
             QLabel#titleLabel {
                 color: #142033;
-                font-size: 12.5pt;
-                font-weight: 700;
                 padding: 4px 0 4px 2px;
             }
             QLabel#appDot {
@@ -2639,8 +2648,6 @@ class MainWindow(QMainWindow):
                 background: rgba(230, 242, 255, 210);
                 border: 1px solid rgba(183, 217, 255, 220);
                 border-radius: 14px;
-                font-size: 10.5pt;
-                font-weight: 700;
                 padding: 5px 12px;
             }
             QWidget#mainGlass {
@@ -2657,8 +2664,6 @@ class MainWindow(QMainWindow):
             }
             QLabel#sidebarTitle {
                 color: #142033;
-                font-size: 11.5pt;
-                font-weight: 700;
                 padding: 4px 8px 8px 8px;
             }
             QLabel#sidebarHint {
@@ -2666,7 +2671,6 @@ class MainWindow(QMainWindow):
                 background: rgba(255, 255, 255, 130);
                 border: 1px solid rgba(213, 224, 237, 180);
                 border-radius: 12px;
-                font-size: 9.5pt;
                 padding: 8px;
             }
             QStackedWidget#mainStack {
@@ -2678,7 +2682,6 @@ class MainWindow(QMainWindow):
                 border: 1px solid transparent;
                 border-radius: 12px;
                 color: #53637a;
-                font-weight: 700;
                 min-height: 30px;
                 padding: 6px 10px;
                 text-align: left;
@@ -2700,12 +2703,9 @@ class MainWindow(QMainWindow):
             }
             QLabel#toolbarTitle {
                 color: #142033;
-                font-size: 12.5pt;
-                font-weight: 700;
             }
             QLabel#toolbarCaption {
                 color: #53637a;
-                font-size: 10.5pt;
             }
             QMenuBar {
                 background: rgba(255, 255, 255, 165);
@@ -2750,7 +2750,6 @@ class MainWindow(QMainWindow):
                 min-width: 104px;
                 margin: 0 4px 8px 0;
                 padding: 5px 16px;
-                font-weight: 600;
             }
             QTabBar::tab:selected {
                 background: #ffffff;
@@ -2765,7 +2764,6 @@ class MainWindow(QMainWindow):
                 background: rgba(255, 255, 255, 185);
                 border: 1px solid rgba(207, 217, 230, 230);
                 border-radius: 18px;
-                font-weight: 700;
                 margin-top: 18px;
                 padding: 16px 12px 12px 12px;
             }
@@ -2781,7 +2779,6 @@ class MainWindow(QMainWindow):
                 border: 1px solid #c9d5e3;
                 border-radius: 12px;
                 color: #172033;
-                font-weight: 700;
                 min-height: 32px;
                 padding: 5px 14px;
             }
@@ -2830,7 +2827,6 @@ class MainWindow(QMainWindow):
                 border: 1px solid #cbd8e6;
                 border-radius: 11px;
                 color: #172033;
-                font-weight: 500;
                 min-height: 30px;
                 padding: 4px 10px;
             }
@@ -2865,7 +2861,6 @@ class MainWindow(QMainWindow):
                 border: 1px solid #d4deea;
                 border-radius: 12px;
                 color: #172033;
-                font-weight: 500;
                 gridline-color: #e1e8f0;
                 selection-background-color: #d9ecff;
                 selection-color: #142033;
@@ -2883,7 +2878,6 @@ class MainWindow(QMainWindow):
                 border-right: 1px solid #dbe4ee;
                 border-bottom: 1px solid #dbe4ee;
                 color: #53637a;
-                font-weight: 700;
                 padding: 6px 8px;
             }
             QPlainTextEdit {
@@ -2891,9 +2885,6 @@ class MainWindow(QMainWindow):
                 border: 1px solid #26364a;
                 border-radius: 14px;
                 color: #e8eef7;
-                font-family: "SF Mono", "Cascadia Mono", Consolas, monospace;
-                font-size: 10.5pt;
-                font-weight: 500;
                 padding: 9px;
             }
             QScrollArea {
@@ -2936,11 +2927,9 @@ class MainWindow(QMainWindow):
             }
             QLabel[status="ok"] {
                 color: #168a4d;
-                font-weight: 700;
             }
             QLabel[status="missing"] {
                 color: #c7342e;
-                font-weight: 700;
             }
         """
         app = QApplication.instance()
@@ -4540,24 +4529,24 @@ class MainWindow(QMainWindow):
             if widget is not None:
                 widget.deleteLater()
 
-        headers = ["项目", "路径/模块", "状态"]
-        for column, header in enumerate(headers):
-            label = QLabel(header)
-            label.setStyleSheet("font-weight: 600;")
-            self.status_layout.addWidget(label, 0, column)
+        for row_index, row in enumerate(rows):
+            state_text = "正常" if row.ok else "缺失"
+            value_text = compact_status_value(row.value)
+            name_label = QLabel(f"{row.name}:")
+            name_label.setWordWrap(False)
+            name_label.setMinimumWidth(0)
+            name_label.setMaximumWidth(118)
+            name_label.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
 
-        for row_index, row in enumerate(rows, start=1):
-            name_label = QLabel(row.name)
-            value_text = row.value
-            if len(value_text) > 96:
-                value_text = f"{value_text[:44]} ... {value_text[-44:]}"
             value_label = QLabel(value_text)
-            value_label.setWordWrap(True)
+            value_label.setWordWrap(False)
             value_label.setToolTip(row.value)
             value_label.setMinimumWidth(0)
-            value_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+            value_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
             value_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
-            status_label = QLabel("正常" if row.ok else "缺失")
+
+            status_label = QLabel(state_text)
+            status_label.setWordWrap(False)
             status_label.setProperty("status", "ok" if row.ok else "missing")
             status_label.style().unpolish(status_label)
             status_label.style().polish(status_label)
@@ -5043,40 +5032,10 @@ class MainWindow(QMainWindow):
         self.log.appendPlainText(f"[{timestamp}] {text}")
 
 
-def load_app_fonts() -> list[str]:
-    font_root = Path(__file__).resolve().parents[1] / "vendor_fonts"
-    if not font_root.exists():
-        return []
-
-    families: list[str] = []
-    for font_path in font_root.rglob("*"):
-        if font_path.suffix.lower() not in {".otf", ".ttf", ".ttc"}:
-            continue
-        font_id = QFontDatabase.addApplicationFont(str(font_path))
-        if font_id < 0:
-            continue
-        families.extend(QFontDatabase.applicationFontFamilies(font_id))
-    return sorted(set(families))
-
-
-def build_app_font(family: str, size: float, weight: QFont.Weight = QFont.Weight.Normal) -> QFont:
-    font = QFont(family)
-    font.setPointSizeF(size)
-    font.setWeight(weight)
-    font.setStyleStrategy(QFont.StyleStrategy.PreferAntialias | QFont.StyleStrategy.PreferQuality)
-    font.setHintingPreference(QFont.HintingPreference.PreferVerticalHinting)
-    return font
-
-
 def main() -> int:
     QApplication.setHighDpiScaleFactorRoundingPolicy(Qt.HighDpiScaleFactorRoundingPolicy.PassThrough)
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
-    loaded_families = load_app_fonts()
-    if "SF Pro Text" in loaded_families:
-        app.setFont(build_app_font("SF Pro Text", 10.5, QFont.Weight.Medium))
-    elif "Noto Sans SC" in QFontDatabase.families():
-        app.setFont(build_app_font("Noto Sans SC", 10.5, QFont.Weight.Medium))
     window = MainWindow()
     window.show()
     return app.exec()
