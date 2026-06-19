@@ -13,11 +13,11 @@ datas = [
     (str(app_root / "README.md"), "."),
 ]
 
-manual = app_root / "docs" / "Windows端软件说明.docx"
+manual = app_root / "docs" / "软件说明.docx"
 if manual.exists():
     datas.append((str(manual), "docs"))
 
-user_manual = app_root / "docs" / "Windows端使用说明书_V26.5.34.docx"
+user_manual = app_root / "docs" / "使用说明书_V26.5.34.docx"
 if user_manual.exists():
     datas.append((str(user_manual), "docs"))
 
