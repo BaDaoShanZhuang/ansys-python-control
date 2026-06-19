@@ -9,7 +9,7 @@ $ErrorActionPreference = "Stop"
 $RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $SpecPath = Join-Path $RepoRoot "packaging\windows_app.spec"
 $InnoScript = Join-Path $RepoRoot "packaging\windows_app.iss"
-$AppName = "Windows" + [char]0x7aef
+$AppName = "ansys-mechanical-zemax"
 $DistDir = Join-Path $RepoRoot ("dist\" + $AppName)
 $ReleaseDir = Join-Path $RepoRoot "release"
 

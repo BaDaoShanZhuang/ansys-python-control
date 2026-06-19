@@ -1,18 +1,19 @@
-#define MyAppName "Windows端"
+#define MyAppName "ansys-mechanical-zemax联合仿真程序"
 #define MyAppVersion "V26.5.34"
 #define MyAppPublisher "BaDaoShanZhuang"
-#define MyAppExeName "Windows端.exe"
+#define MyAppDir "ansys-mechanical-zemax"
+#define MyAppExeName "ansys-mechanical-zemax.exe"
 
 [Setup]
 AppId={{7D75CC3F-0C8D-4B86-8C19-7053F13B8993}
 AppName={#MyAppName}
 AppVersion={#MyAppVersion}
 AppPublisher={#MyAppPublisher}
-DefaultDirName={localappdata}\Programs\{#MyAppName}
+DefaultDirName={localappdata}\Programs\{#MyAppDir}
 DefaultGroupName={#MyAppName}
 DisableProgramGroupPage=yes
 OutputDir=..\release
-OutputBaseFilename=Windows端_Setup_{#MyAppVersion}
+OutputBaseFilename={#MyAppDir}_Setup_{#MyAppVersion}
 Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern
@@ -28,7 +29,7 @@ Name: "chinesesimp"; MessagesFile: "compiler:Default.isl"
 Name: "desktopicon"; Description: "创建桌面快捷方式"; GroupDescription: "附加图标："; Flags: unchecked
 
 [Files]
-Source: "..\dist\Windows端\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "..\dist\{#MyAppDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
 Name: "{autoprograms}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; WorkingDir: "{app}"
