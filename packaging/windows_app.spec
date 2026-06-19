@@ -17,6 +17,10 @@ manual = app_root / "docs" / "Windows端软件说明.docx"
 if manual.exists():
     datas.append((str(manual), "docs"))
 
+user_manual = app_root / "docs" / "Windows端使用说明书_V26.5.34.docx"
+if user_manual.exists():
+    datas.append((str(user_manual), "docs"))
+
 formula_doc = app_root / "docs" / "节点位移计算整体位移和旋转_理论公式.docx"
 if formula_doc.exists():
     datas.append((str(formula_doc), "docs"))
