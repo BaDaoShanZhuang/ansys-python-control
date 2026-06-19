@@ -1,38 +1,46 @@
-# Ansys–Zemax STOP 联动控制台(原 Windows端)
+# ansys-mechanical-zemax联合仿真程序
 
-`Windows端 V26.5.34` is a local desktop controller for Ansys Mechanical and Zemax OpticStudio.
+A local desktop controller for **Ansys Mechanical ↔ Zemax OpticStudio** co-simulation (STOP: Structural–Thermal–Optical Performance). Version **V26.5.34**.
 
-The current main workflow uses Mechanical database files (`.mechdb` / `.mechdat`). After a database file is selected, the APP opens the current project in a background Mechanical session, connects through PyMechanical, reads the analyses from that Mechanical session, and performs settings, solve, result-read, and export operations against the current background Mechanical session.
+It drives both solvers from one GUI: runs a background Mechanical session, exports node displacements, converts them to optical element rigid-body displacement/rotation (decenter / despace / tilt), writes them into a non-sequential Zemax model, runs ray traces, and reads detector results. It does **not** replace the solvers — FEM is still solved by Mechanical and ray tracing by Zemax.
+
+The current main workflow uses Mechanical **database files** (`.mechdb` / `.mechdat`). After a database file is selected, the APP opens it in a background Mechanical session, connects through PyMechanical, reads analyses from that session, and performs settings / solve / result-read / export against it.
+
+## Documentation
+
+| Doc (`docs/`) | Audience |
+|---------------|----------|
+| `Windows端软件说明` | 用户向：软件总体说明 |
+| `Windows端使用说明书_V26.5.34` | 用户向：操作手册 |
+| `节点位移计算整体位移和旋转_理论公式` | 刚体配准 / 随机振动采样的数学推导 |
+| `软件开发文档` | 开发/维护者：架构、模块、数据格式、构建 |
+
+MATLAB helpers for the detector time-series `.dts` files live in `tools/matlab/`.
 
 ## Local paths
 
 - Mechanical executable: `D:\Program Files\ANSYS Inc\v261\aisol\bin\winx64\AnsysWBU.exe`
 - Zemax OpticStudio executable: `D:\Program Files\ANSYS Inc\v261\Zemax OpticStudio\OpticStudio.exe`
-- Python interpreter: `D:\anaconda\envs\zemax310\python.exe`
+- Python interpreter (source runs): `D:\anaconda\envs\zemax310\python.exe` (`3.10 ≤ ver < 3.12`)
 
-## Install dependencies
+These are auto-detected on first run; override via `文件 → 路径设置` or the env vars below.
 
-Run this from PowerShell or from the PyCharm terminal:
-
-```powershell
-& 'D:\260415\ansys_python_control\tools\install_dependencies.ps1'
-```
-
-## Run
-
-Check the configured interpreter and required packages:
+## Install dependencies (source)
 
 ```powershell
-& 'D:\anaconda\envs\zemax310\python.exe' 'D:\260415\ansys_python_control\scripts\check_environment.py'
+powershell -NoProfile -ExecutionPolicy Bypass -File tools\install_dependencies.ps1
 ```
 
-Start the desktop APP:
+Dependencies: `ansys-mechanical-core`, `PySide6`, `pythonnet`, `numpy`, `scipy` (see `requirements.txt`).
+
+## Run (source)
 
 ```powershell
-& 'D:\anaconda\envs\zemax310\python.exe' 'D:\260415\ansys_python_control\scripts\run_app.py'
+& 'D:\anaconda\envs\zemax310\python.exe' scripts\check_environment.py   # verify interpreter + packages + exe paths
+& 'D:\anaconda\envs\zemax310\python.exe' scripts\run_app.py             # start the desktop APP
 ```
 
-Inside PyCharm, use the same interpreter:
+Inside PyCharm, point the interpreter at the same conda env, then:
 
 ```powershell
 python -m pip install -e .
@@ -42,68 +50,53 @@ python scripts\run_app.py
 
 ## Build installer
 
-Build a distributable Windows installer:
-
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File tools\build_windows_installer.ps1
-```
-
-If Inno Setup 6 is not installed yet, run:
-
-```powershell
+# first time, to also install Inno Setup 6:
 powershell -NoProfile -ExecutionPolicy Bypass -File tools\build_windows_installer.ps1 -InstallInnoSetup
 ```
 
-The generated installer is written to `release\Windows端_Setup_V26.5.34.exe`.
-The installer includes the Python runtime, PySide6, PyMechanical/ZOS-API Python dependencies, and bundled documentation. It does not include Ansys Mechanical, Zemax OpticStudio, or their licenses; those must already be installed and licensed on the target computer.
+The installer is written to `release\ansys-mechanical-zemax_Setup_V26.5.34.exe`. It bundles the Python runtime, PySide6, PyMechanical/ZOS-API dependencies, numpy/scipy, and the `docs/` documentation. It does **not** include Ansys Mechanical, Zemax OpticStudio, or their licenses — those must already be installed and licensed on the target machine.
 
-On first startup after installation, the APP automatically scans common Ansys and Zemax install locations, including `C:\Program Files\ANSYS Inc\v*`, `D:\Program Files\ANSYS Inc\v*`, and common OpticStudio folders. Detected paths are saved to `%APPDATA%\WindowsDuan\settings.json`.
+On first startup the APP scans common install locations (`C:\` / `D:\Program Files\ANSYS Inc\v*` and common OpticStudio folders) and saves detected paths to `%APPDATA%\WindowsDuan\settings.json`. Runtime logs roll daily into `%APPDATA%\WindowsDuan\logs\`.
 
-The user can open `文件 -> 路径设置` or click `路径设置` in the Mechanical console to review or change:
+Path priority is **environment variables > user config > auto-detection**. Env vars: `ANSYS_ROOT`, `ANSYS_RUNWB2`, `ANSYS_MECHANICAL_EXE`, `ANSYS_OPTICSTUDIO_EXE`.
 
-- ANSYS root directory
-- `RunWB2.exe`
-- `AnsysWBU.exe`
-- `OpticStudio.exe`
+## Desktop APP — current functions
 
-Environment variables still have the highest priority when they are set: `ANSYS_ROOT`, `ANSYS_RUNWB2`, `ANSYS_MECHANICAL_EXE`, and `ANSYS_OPTICSTUDIO_EXE`.
+**Mechanical**
 
-## Desktop APP
+- Select a database (`.mechdb` / `.mechdat`); open it in a persistent background session without blocking the UI.
+- Read analysis modules from the live session (not guessed from filenames).
+- Read editable settings dynamically from `AnalysisSettings.VisibleProperties`; read/import Tabular Data; read analysis conditions (loads, supports, force, temperature, gravity, thermal BCs).
+- Save changes back to the session (written to disk only when you choose "save" on close).
+- Clear the module's old solution before solving; show stage / status / elapsed in the "current operation" panel.
+- Read Solution result objects; export one result to TXT (with time/frequency-set range export) or PNG.
+- Close with a save / discard / cancel dialog.
 
-Current functions:
+**Zemax (background ZOS-API, no GUI window)**
 
-- Select a Mechanical database file (`.mechdb` / `.mechdat`).
-- Open the selected database in a background Mechanical session without blocking the APP.
-- Read analysis modules from the currently opened Mechanical session.
-- Open a settings window for the selected analysis module only after Mechanical is open.
-- Read editable Mechanical analysis settings dynamically from `AnalysisSettings.VisibleProperties`.
-- Read the selected module's analysis conditions, including loads, supports, force, temperature, gravity, and thermal boundary conditions.
-- Save changed settings and editable analysis-condition properties back to the current Mechanical session.
-- Clear the selected module's current generated solution data before solving.
-- Show solve stage, status, and elapsed time in the right-side operation-status panel.
-- Read solve setup, analysis conditions, and Solution result objects from the current module.
-- Export one selected Solution result to TXT, including time-range export when the result supports time/frequency sets.
-- Export the selected Mechanical result view image to PNG.
-- Close the current Mechanical session with a dialog that lets the user save, discard changes, or cancel.
-- Select a Zemax `.zmx` project without opening the OpticStudio GUI.
-- Read Mechanical exported mirror/lens node results and calculate rigid-body position and rotation changes.
-- Import calculated lens pose changes into the selected non-sequential Zemax project through a background ZOS-API session.
-- Write Zemax lens poses as `original baseline + current Mechanical delta`, so repeated imports do not accumulate the same change.
-- Open a popup Zemax ray-trace/detector tab, clear all non-sequential Detector objects, run one background NSC ray trace with the current Zemax project's default ray-trace settings, then let the user select one Detector and export only that detector grid to CSV and pseudo-color PNG.
-- Detect the local logical CPU core count and set Zemax NSC Ray Trace `NumberOfCores` to all cores by default.
-- Save or discard the program-managed background Zemax API session from the APP.
-- Check local executable paths and required Python packages.
+- Select a `.zmx` project.
+- Read Mechanical node-displacement exports and compute rigid-body displacement/rotation per element via SVD/Kabsch (with reflection protection), plus a surface-figure residual RMS diagnostic.
+- Import poses as `original baseline + current Mechanical delta` (repeated imports do not accumulate). Three modes: **steady-state**, **transient** and **random vibration**; transient/random use a two-step *import folder → trace & save DTS* flow.
+- Random vibration samples N(0, Σ=D·C·D) from the per-DOF 1σ (optional `pose_correlation.csv`).
+- Ray trace: clear non-sequential detectors, set NSC `NumberOfCores` to all logical cores, run one trace with the project's default settings.
+- Detector window: read detectors, full-resolution quick view with mouse-wheel zoom, export to **MATLAB `.mat`** + pseudo-color PNG, and play detector time-series `.dts` (per-frame centroid shown during playback).
 
 ## Code layout
 
-- `ansys_control\gui.py`: PySide6 desktop APP.
-- `ansys_control\mechanical.py`: Mechanical launch, connection, database discovery, and close/save helpers.
-- `ansys_control\mechanical_ops.py`: Mechanical operations, result export, and legacy Workbench-compatible operations.
-- `ansys_control\zemax.py`: Zemax background ZOS-API import, Mechanical pose calculation, baseline handling, ray trace, and detector image export.
+| File | Responsibility |
+|------|----------------|
+| `ansys_control/gui.py` | PySide6 desktop APP: `MainWindow`, dialogs, `*Worker` threads, light-theme QSS |
+| `ansys_control/mechanical.py` | Mechanical launch / connection / database discovery / close-save / session port |
+| `ansys_control/mechanical_ops.py` | Mechanical journal-script generation, settings & result collection, exports |
+| `ansys_control/zemax.py` | Background ZOS-API, pose calculation, baseline handling, ray trace, detector & DTS export |
+| `ansys_control/config.py` | Path auto-detection and user settings (`settings.json`) |
+| `ansys_control/logging_setup.py` | File logging + global excepthook + Qt message handler |
 
 ## Legacy Workbench tools
 
-Some command-line scripts still exist for old `.wbpj` / `.wbpz` workflows:
+Command-line scripts for old `.wbpj` / `.wbpz` workflows remain as compatibility helpers only; the desktop workflow should use `.mechdb` / `.mechdat`:
 
 ```powershell
 python scripts\list_analysis_modules.py D:\path\to\project.wbpj
@@ -111,6 +104,3 @@ python scripts\open_mechanical.py D:\path\to\project.wbpj --system SYS
 python scripts\module_operation.py read --project D:\path\to\project.wbpj --system SYS
 python scripts\run_journal.py --project D:\path\to\project.wbpj D:\path\to\journal.wbjn
 ```
-
-These are compatibility helpers only. The desktop APP workflow should use `.mechdb` / `.mechdat`.
-

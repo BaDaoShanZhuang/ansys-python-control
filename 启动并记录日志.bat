@@ -1,6 +1,6 @@
 @echo off
 chcp 65001 >nul
-title Ansys-Zemax STOP 联动控制台 (诊断启动)
+title ansys-mechanical-zemax联合仿真程序 (诊断启动)
 set "PY=D:\anaconda\envs\zemax310\python.exe"
 set "ROOT=D:\260415\ansys_python_control_revised_20260619"
 set "LOG=%ROOT%\launch_log.txt"

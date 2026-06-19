@@ -1,6 +1,6 @@
 @echo off
 chcp 65001 >nul
-title Ansys-Zemax STOP 联动控制台 (修订版/源码启动)
+title ansys-mechanical-zemax联合仿真程序 (修订版/源码启动)
 set "PY=D:\anaconda\envs\zemax310\python.exe"
 set "APP=D:\260415\ansys_python_control_revised_20260619\scripts\run_app.py"
 if not exist "%PY%" (

@@ -3476,7 +3476,7 @@ def _false_color_png_bytes(
 
 def _matlab_dts_loader_text() -> str:
     return """function series = load_dts_detector_series(dtsFile, outputFolder)
-%LOAD_DTS_DETECTOR_SERIES Read Ansys-Zemax STOP transient detector .dts files.
+%LOAD_DTS_DETECTOR_SERIES Read ansys-mechanical-zemax detector .dts files.
 %   series = load_dts_detector_series('result.dts') unzips the custom .dts
 %   container, reads manifest.json, and loads each detector CSV matrix.
 %
