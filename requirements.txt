@@ -1,2 +1,5 @@
 ansys-mechanical-core
 PySide6
+numpy
+scipy
+pythonnet

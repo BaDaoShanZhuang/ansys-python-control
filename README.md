@@ -1,6 +1,6 @@
-# Windows端
+# Ansys–Zemax STOP 联动控制台(原 Windows端)
 
-`Windows端 V26.5.29` is a local desktop controller for Ansys Mechanical and Zemax OpticStudio.
+`Windows端 V26.5.34` is a local desktop controller for Ansys Mechanical and Zemax OpticStudio.
 
 The current main workflow uses Mechanical database files (`.mechdb` / `.mechdat`). After a database file is selected, the APP opens the current project in a background Mechanical session, connects through PyMechanical, reads the analyses from that Mechanical session, and performs settings, solve, result-read, and export operations against the current background Mechanical session.
 
@@ -39,6 +39,34 @@ python -m pip install -e .
 python scripts\check_environment.py
 python scripts\run_app.py
 ```
+
+## Build installer
+
+Build a distributable Windows installer:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File tools\build_windows_installer.ps1
+```
+
+If Inno Setup 6 is not installed yet, run:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File tools\build_windows_installer.ps1 -InstallInnoSetup
+```
+
+The generated installer is written to `release\Windows端_Setup_V26.5.34.exe`.
+The installer includes the Python runtime, PySide6, PyMechanical/ZOS-API Python dependencies, and bundled documentation. It does not include Ansys Mechanical, Zemax OpticStudio, or their licenses; those must already be installed and licensed on the target computer.
+
+On first startup after installation, the APP automatically scans common Ansys and Zemax install locations, including `C:\Program Files\ANSYS Inc\v*`, `D:\Program Files\ANSYS Inc\v*`, and common OpticStudio folders. Detected paths are saved to `%APPDATA%\WindowsDuan\settings.json`.
+
+The user can open `文件 -> 路径设置` or click `路径设置` in the Mechanical console to review or change:
+
+- ANSYS root directory
+- `RunWB2.exe`
+- `AnsysWBU.exe`
+- `OpticStudio.exe`
+
+Environment variables still have the highest priority when they are set: `ANSYS_ROOT`, `ANSYS_RUNWB2`, `ANSYS_MECHANICAL_EXE`, and `ANSYS_OPTICSTUDIO_EXE`.
 
 ## Desktop APP
 
@@ -85,3 +113,4 @@ python scripts\run_journal.py --project D:\path\to\project.wbpj D:\path\to\journ
 ```
 
 These are compatibility helpers only. The desktop APP workflow should use `.mechdb` / `.mechdat`.
+

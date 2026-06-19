@@ -5,7 +5,8 @@ import socket
 import time
 from pathlib import Path
 
-from .config import MECHANICAL_EXE, PROJECT_FILE, require_file
+from . import config as app_config
+from .config import PROJECT_FILE, require_file
 
 
 MECHANICAL_DATABASE_SUFFIXES = {".mechdb", ".mechdat"}
@@ -134,7 +135,7 @@ def read_mechanical_database_analysis_modules(
 
     from .mechanical_ops import AnalysisModule
 
-    mechanical_exe = require_file(MECHANICAL_EXE, "Mechanical executable")
+    mechanical_exe = require_file(app_config.MECHANICAL_EXE, "Mechanical executable")
     mechdb = find_project_mechdb(project_file)
     _emit_progress(progress_callback, "启动 Mechanical", f"后台读取 database 模块: {mechdb.name}")
     session = launch_mechanical(
@@ -218,7 +219,7 @@ def launch_mechanical_session(*, batch: bool = True, cleanup_on_exit: bool = Fal
     """Launch Mechanical through PyMechanical and return the session object."""
     from ansys.mechanical.core import launch_mechanical
 
-    mechanical_exe = require_file(MECHANICAL_EXE, "Mechanical executable")
+    mechanical_exe = require_file(app_config.MECHANICAL_EXE, "Mechanical executable")
     return launch_mechanical(
         exec_file=str(mechanical_exe),
         batch=batch,
@@ -234,7 +235,7 @@ def launch_mechanical_project_session(
     """Launch a background, PyMechanical-connectable Mechanical session for a project."""
     from ansys.mechanical.core import launch_mechanical
 
-    mechanical_exe = require_file(MECHANICAL_EXE, "Mechanical executable")
+    mechanical_exe = require_file(app_config.MECHANICAL_EXE, "Mechanical executable")
     mechdb = find_project_mechdb(project_file)
     return launch_mechanical(
         exec_file=str(mechanical_exe),

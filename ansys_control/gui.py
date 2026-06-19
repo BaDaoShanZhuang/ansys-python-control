@@ -15,7 +15,7 @@ from pathlib import Path
 from xml.etree import ElementTree as ET
 
 from PySide6.QtCore import QObject, Qt, QThread, QTimer, Signal, Slot
-from PySide6.QtGui import QAction, QColor, QImage, QPainter, QPen, QPixmap, qRgb
+from PySide6.QtGui import QAction, QColor, QFont, QFontDatabase, QImage, QPainter, QPalette, QPen, QPixmap, qRgb
 from PySide6.QtWidgets import (
     QApplication,
     QAbstractItemView,
@@ -27,6 +27,7 @@ from PySide6.QtWidgets import (
     QGroupBox,
     QHeaderView,
     QHBoxLayout,
+    QInputDialog,
     QLabel,
     QLineEdit,
     QMainWindow,
@@ -47,7 +48,9 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from .config import MECHANICAL_EXE, OPTICSTUDIO_EXE, PROJECT_FILE, RUNWB2, WORKSPACE
+from . import config as app_config
+from . import logging_setup
+from .config import PROJECT_FILE, WORKSPACE
 from .mechanical import (
     MECHANICAL_DATABASE_SUFFIXES,
     find_project_mechdb,
@@ -81,10 +84,11 @@ from .zemax import (
 )
 
 
+_logger = logging_setup.get_logger()
+
 ZEMAX_PROCESS_NAMES = ["OpticStudio.exe"]
-APP_NAME = "Windows端"
-APP_VERSION = "V26.5.29"
-APP_TITLE = "对话框控制程序"
+APP_NAME = "ansys-mechanical-zemax联合仿真程序"
+APP_VERSION = "V26.5.34"
 MECHANICAL_REQUIRED_MESSAGE = (
     "请先选择 Mechanical database（.mechdb/.mechdat），程序会自动启动后台 Mechanical。"
     "读取设置、求解、读取结果和导出结果都只连接当前后台 Mechanical 会话，不再重新打开 Workbench。"
@@ -141,6 +145,128 @@ def compact_status_value(value: str, max_chars: int = 52) -> str:
     return f"{value[:left]} ... {value[-right:]}"
 
 
+class PathSettingsDialog(QDialog):
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("路径设置")
+        self.setMinimumWidth(780)
+        self.edits: dict[str, QLineEdit] = {}
+
+        layout = QVBoxLayout(self)
+        layout.setSpacing(10)
+
+        info = QLabel(f"配置文件: {app_config.SETTINGS_FILE}")
+        info.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        layout.addWidget(info)
+
+        grid = QGridLayout()
+        grid.setHorizontalSpacing(8)
+        grid.setVerticalSpacing(8)
+        layout.addLayout(grid)
+
+        rows = [
+            ("ansys_root", "ANSYS 根目录", "选择 ANSYS Inc\\v261 这一级目录", "folder"),
+            ("runwb2", "RunWB2", "Workbench 启动程序 RunWB2.exe", "exe"),
+            ("mechanical_exe", "Mechanical", "Mechanical 启动程序 AnsysWBU.exe", "exe"),
+            ("opticstudio_exe", "Zemax OpticStudio", "OpticStudio.exe", "exe"),
+        ]
+        values = app_config.get_path_settings()
+        for row_index, (key, label, placeholder, kind) in enumerate(rows):
+            name = QLabel(label)
+            edit = QLineEdit(values.get(key, ""))
+            edit.setPlaceholderText(placeholder)
+            edit.setClearButtonEnabled(True)
+            browse = QPushButton("选择")
+            browse.clicked.connect(lambda checked=False, k=key, path_kind=kind: self.browse_path(k, path_kind))
+            self.edits[key] = edit
+            grid.addWidget(name, row_index, 0)
+            grid.addWidget(edit, row_index, 1)
+            grid.addWidget(browse, row_index, 2)
+
+        button_row = QHBoxLayout()
+        button_row.setSpacing(8)
+        self.detect_button = QPushButton("自动检测")
+        self.detect_button.setIcon(self.style().standardIcon(QStyle.SP_BrowserReload))
+        self.detect_button.clicked.connect(self.auto_detect_paths)
+
+        save_button = QPushButton("保存")
+        save_button.setObjectName("primaryAction")
+        save_button.clicked.connect(self.save_and_accept)
+
+        cancel_button = QPushButton("取消")
+        cancel_button.clicked.connect(self.reject)
+
+        button_row.addWidget(self.detect_button)
+        button_row.addStretch(1)
+        button_row.addWidget(save_button)
+        button_row.addWidget(cancel_button)
+        layout.addLayout(button_row)
+
+    def browse_path(self, key: str, kind: str) -> None:
+        current = self.edits[key].text().strip()
+        start_dir = str(Path(current).parent if current and Path(current).suffix else Path(current or "C:\\"))
+        if kind == "folder":
+            folder = QFileDialog.getExistingDirectory(self, "选择 ANSYS 根目录", current or "C:\\")
+            if folder:
+                self.edits[key].setText(folder)
+                self.fill_relative_paths_from_ansys_root(Path(folder))
+            return
+
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "选择可执行文件",
+            start_dir,
+            "Executable (*.exe);;All Files (*)",
+        )
+        if file_path:
+            self.edits[key].setText(file_path)
+
+    def fill_relative_paths_from_ansys_root(self, root: Path) -> None:
+        related = {
+            "runwb2": root / "Framework" / "bin" / "Win64" / "RunWB2.exe",
+            "mechanical_exe": root / "aisol" / "bin" / "winx64" / "AnsysWBU.exe",
+            "opticstudio_exe": root / "Zemax OpticStudio" / "OpticStudio.exe",
+        }
+        for key, path in related.items():
+            if path.exists():
+                self.edits[key].setText(str(path))
+
+    def auto_detect_paths(self) -> None:
+        detected = app_config.detect_installation_paths()
+        if not detected:
+            QMessageBox.warning(self, "未检测到", "没有在常见安装目录中检测到 Ansys Mechanical 或 Zemax OpticStudio。")
+            return
+        for key, value in detected.items():
+            if key in self.edits:
+                self.edits[key].setText(value)
+        QMessageBox.information(self, "检测完成", f"已检测到 {len(detected)} 个路径。")
+
+    def save_and_accept(self) -> None:
+        paths = {key: edit.text().strip() for key, edit in self.edits.items()}
+        missing = []
+        for key, label in [
+            ("ansys_root", "ANSYS 根目录"),
+            ("runwb2", "RunWB2"),
+            ("mechanical_exe", "Mechanical"),
+            ("opticstudio_exe", "Zemax OpticStudio"),
+        ]:
+            value = paths.get(key, "")
+            if value and not Path(value).exists():
+                missing.append(f"{label}: {value}")
+        if missing:
+            answer = QMessageBox.question(
+                self,
+                "路径不存在",
+                "以下路径当前不存在，仍然保存吗？\n\n" + "\n".join(missing),
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if answer != QMessageBox.Yes:
+                return
+        app_config.save_path_settings(paths)
+        self.accept()
+
+
 class ModuleLoadWorker(QObject):
     finished = Signal(object)
     failed = Signal(str)
@@ -174,6 +300,7 @@ class ModuleLoadWorker(QObject):
             else:
                 modules = read_project_analysis_modules(self.project)
         except Exception as exc:
+            _logger.exception("后台任务 %s 失败", type(self).__name__)
             self.failed.emit(str(exc))
         else:
             self.finished.emit({"project": self.project, "modules": modules})
@@ -283,6 +410,7 @@ class MechanicalOperationWorker(QObject):
             else:
                 raise ValueError(f"Unknown operation: {self.operation}")
         except Exception as exc:
+            _logger.exception("后台任务 %s 失败", type(self).__name__)
             self.failed.emit(str(exc))
         else:
             self.finished.emit(result)
@@ -328,6 +456,7 @@ class MechanicalLaunchWorker(QObject):
                 }
             )
         except Exception as exc:
+            _logger.exception("后台任务 %s 失败", type(self).__name__)
             self.failed.emit(str(exc))
         else:
             self.finished.emit(
@@ -373,6 +502,7 @@ class MechanicalCloseWorker(QObject):
                 progress_callback=self.progress.emit,
             )
         except Exception as exc:
+            _logger.exception("后台任务 %s 失败", type(self).__name__)
             self.failed.emit(str(exc))
         else:
             self.finished.emit(result)
@@ -407,6 +537,7 @@ class ZemaxPoseImportWorker(QObject):
                 save=False,
             )
         except Exception as exc:
+            _logger.exception("后台任务 %s 失败", type(self).__name__)
             self.failed.emit(str(exc))
         else:
             self.finished.emit(result)
@@ -437,6 +568,7 @@ class ZemaxCloseWorker(QObject):
             )
             managed_result = close_managed_opticstudio_project(self.project, save=self.save_project)
         except Exception as exc:
+            _logger.exception("后台任务 %s 失败", type(self).__name__)
             self.failed.emit(str(exc))
         else:
             self.finished.emit(
@@ -462,8 +594,7 @@ class ZemaxDetectorWorker(QObject):
         output_dir: Path | None = None,
         log_scale: bool = True,
         cpu_core_count: int | None = None,
-        write_csv: bool = False,
-        preview_max_dimension: int | None = DETECTOR_PREVIEW_MAX_DIMENSION,
+        export_matlab: bool = False,
         export_folder: Path | None = None,
         output_file: Path | None = None,
         sample_count: int = 20,
@@ -476,8 +607,7 @@ class ZemaxDetectorWorker(QObject):
         self.output_dir = output_dir
         self.log_scale = log_scale
         self.cpu_core_count = cpu_core_count
-        self.write_csv = write_csv
-        self.preview_max_dimension = preview_max_dimension
+        self.export_matlab = export_matlab
         self.export_folder = export_folder
         self.output_file = output_file
         self.sample_count = max(1, int(sample_count))
@@ -543,14 +673,14 @@ class ZemaxDetectorWorker(QObject):
             elif self.operation in {"read_detector_result", "export_detector_result"}:
                 if self.detector_number is None:
                     raise ValueError("未选择探测器。")
-                write_csv = bool(self.write_csv or self.operation == "export_detector_result")
+                export_matlab = bool(self.export_matlab or self.operation == "export_detector_result")
                 self.progress.emit(
                     {
                         "stage": "Zemax 探测器结果",
                         "status": (
-                            f"正在完整导出 Detector {self.detector_number}"
-                            if write_csv
-                            else f"正在快速读取 Detector {self.detector_number} 预览"
+                            f"正在完整导出 Detector {self.detector_number} 为 MATLAB(.mat)"
+                            if export_matlab
+                            else f"正在全分辨率读取 Detector {self.detector_number}"
                         ),
                     }
                 )
@@ -559,13 +689,13 @@ class ZemaxDetectorWorker(QObject):
                     self.detector_number,
                     output_dir=self.output_dir,
                     log_scale=self.log_scale,
-                    write_csv=write_csv,
-                    preview_max_dimension=None if write_csv else self.preview_max_dimension,
+                    export_matlab=export_matlab,
                 )
                 result["operation"] = self.operation
             else:
                 raise ValueError(f"未知 Zemax 探测器操作: {self.operation}")
         except Exception as exc:
+            _logger.exception("后台任务 %s 失败", type(self).__name__)
             self.failed.emit(str(exc))
         else:
             self.finished.emit(result)
@@ -701,7 +831,7 @@ class AnalysisSettingsDialog(QDialog):
         self.tabular_curve_label = QLabel("暂无曲线")
         self.tabular_curve_label.setAlignment(Qt.AlignCenter)
         self.tabular_curve_label.setMinimumSize(420, 260)
-        self.tabular_curve_label.setStyleSheet("border: 1px solid #d0d5dd; background: #ffffff;")
+        self.tabular_curve_label.setStyleSheet("border: 1px solid #e2e8ee; background: #ffffff; border-radius: 6px;")
 
         tabular_preview_splitter.addWidget(self.tabular_data_table)
         tabular_preview_splitter.addWidget(self.tabular_curve_label)
@@ -1245,17 +1375,17 @@ class AnalysisSettingsDialog(QDialog):
         pixmap.fill(QColor("#ffffff"))
         painter = QPainter(pixmap)
         painter.setRenderHint(QPainter.Antialiasing)
-        painter.setPen(QPen(QColor("#1f2937"), 1))
+        painter.setPen(QPen(QColor("#9aa6b2"), 1))
         painter.drawRect(left, top, plot_width, plot_height)
 
-        painter.setPen(QPen(QColor("#e5e7eb"), 1))
+        painter.setPen(QPen(QColor("#e6ebf0"), 1))
         for step in range(1, 5):
             x = left + int(plot_width * step / 5)
             y = top + int(plot_height * step / 5)
             painter.drawLine(x, top, x, top + plot_height)
             painter.drawLine(left, y, left + plot_width, y)
 
-        painter.setPen(QPen(QColor("#374151"), 1))
+        painter.setPen(QPen(QColor("#5b6776"), 1))
         title = f"{table.get('owner', '')} / {table.get('property', table.get('title', ''))}"
         painter.drawText(left, 20, str(title)[:90])
         painter.drawText(left, height - 18, f"X: {self._tabular_headers(table)[x_index]}")
@@ -1896,12 +2026,27 @@ class SolutionResultsDialog(QDialog):
             table.setItem(row, column, QTableWidgetItem(value))
 
 
+class DetectorPreviewScrollArea(QScrollArea):
+    """探测器伪彩色图预览区:鼠标滚轮直接缩放(向上滚放大、向下滚缩小)。"""
+
+    wheel_zoomed = Signal(float)
+
+    def wheelEvent(self, event) -> None:  # noqa: N802 (Qt 命名)
+        delta = event.angleDelta().y()
+        if delta == 0:
+            super().wheelEvent(event)
+            return
+        self.wheel_zoomed.emit(1.25 if delta > 0 else 0.8)
+        event.accept()
+
+
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
-        self.setWindowTitle(APP_TITLE)
-        self.resize(1260, 840)
-        self.setMinimumSize(1100, 720)
+        self._logger = logging_setup.get_logger()
+        self.setWindowTitle(f"{APP_NAME} {APP_VERSION}")
+        self.resize(1380, 920)
+        self.setMinimumSize(1180, 780)
 
         self.selected_project: Path | None = PROJECT_FILE
         self.selected_mechanical_export_folder: Path | None = None
@@ -1917,6 +2062,9 @@ class MainWindow(QMainWindow):
         self.zemax_time_series_path: Path | None = None
         self.zemax_time_series_manifest: dict[str, object] = {}
         self.zemax_time_series_frames: list[dict[str, object]] = []
+        self.zemax_time_series_archive: zipfile.ZipFile | None = None
+        self.zemax_time_series_pixmap_cache: dict[int, QPixmap] = {}
+        self.zemax_time_series_pixmap_cache_order: list[int] = []
         self.zemax_time_series_current_index = 0
         self.zemax_time_series_timer = QTimer(self)
         self.zemax_time_series_timer.timeout.connect(self.advance_zemax_time_series_frame)
@@ -1932,9 +2080,12 @@ class MainWindow(QMainWindow):
         self.mechanical_port: int | None = None
         self.module_load_show_errors = True
         self.load_modules_after_mechanical_launch = False
+        self._random_trace_pending = False
+        self._time_series_pending = False
         self.operation_started_at: float | None = None
         self.operation_stage = "空闲"
         self.operation_status = "等待操作"
+        self.operation_state = "idle"
         self.operation_timer = QTimer(self)
         self.operation_timer.timeout.connect(self.update_operation_timer)
 
@@ -1976,9 +2127,12 @@ class MainWindow(QMainWindow):
         self.zemax_nav_button.setCheckable(True)
         self.zemax_nav_button.clicked.connect(lambda: self._set_main_view(1))
         sidebar_layout.addWidget(self.zemax_nav_button)
+
+        sidebar_layout.addSpacing(6)
+        sidebar_layout.addWidget(self._build_operation_panel())
         sidebar_layout.addStretch(1)
 
-        sidebar_hint = QLabel("Windows 软件")
+        sidebar_hint = QLabel(APP_VERSION)
         sidebar_hint.setObjectName("sidebarHint")
         sidebar_layout.addWidget(sidebar_hint)
 
@@ -1992,16 +2146,8 @@ class MainWindow(QMainWindow):
         main_area_layout.addWidget(self.main_stack, stretch=1)
         body_splitter.addWidget(main_area)
 
-        bottom_splitter = QSplitter(Qt.Horizontal)
-        bottom_splitter.setObjectName("bottomSplitter")
-        bottom_splitter.setChildrenCollapsible(False)
-        bottom_splitter.addWidget(self._build_operation_group())
-        bottom_splitter.addWidget(self._build_log_group())
-        bottom_splitter.setStretchFactor(0, 1)
-        bottom_splitter.setStretchFactor(1, 3)
-        bottom_splitter.setSizes([360, 860])
-        body_splitter.addWidget(bottom_splitter)
-        body_splitter.setSizes([640, 180])
+        body_splitter.addWidget(self._build_log_group())
+        body_splitter.setSizes([760, 190])
 
         self.setCentralWidget(central)
         self._build_menu()
@@ -2013,6 +2159,7 @@ class MainWindow(QMainWindow):
                 "status": self.operation_status,
             }
         )
+        self.log_startup_path_detection()
         self.refresh_status()
         current_project = self.current_project_path()
         if current_project is not None and current_project.exists():
@@ -2088,6 +2235,10 @@ class MainWindow(QMainWindow):
         self.check_button.setIcon(self.style().standardIcon(QStyle.SP_BrowserReload))
         self.check_button.clicked.connect(self.refresh_status)
 
+        self.path_settings_button = QPushButton("路径设置")
+        self.path_settings_button.setIcon(self.style().standardIcon(QStyle.SP_FileDialogDetailedView))
+        self.path_settings_button.clicked.connect(self.open_path_settings_dialog)
+
         self.close_mechanical_button = QPushButton("关闭后台")
         self.close_mechanical_button.setObjectName("dangerButton")
         self.close_mechanical_button.setIcon(self.style().standardIcon(QStyle.SP_DialogCloseButton))
@@ -2106,6 +2257,7 @@ class MainWindow(QMainWindow):
         action_row.setSpacing(6)
         action_row.addStretch(1)
         action_row.addWidget(self.check_button)
+        action_row.addWidget(self.path_settings_button)
         action_row.addWidget(self.close_mechanical_button)
         toolbar_layout.addLayout(action_row)
         return toolbar
@@ -2127,18 +2279,22 @@ class MainWindow(QMainWindow):
         top_splitter.setStretchFactor(0, 2)
         top_splitter.setStretchFactor(1, 1)
         top_splitter.setSizes([760, 420])
+        top_splitter.setMinimumHeight(200)
 
+        pose_import_group = self._build_zemax_pose_import_group()
+        pose_import_group.setMinimumHeight(420)
         splitter.addWidget(top_splitter)
-        splitter.addWidget(self._build_zemax_pose_import_group())
+        splitter.addWidget(pose_import_group)
         splitter.addWidget(self._build_zemax_raytrace_launcher_group())
-        splitter.setStretchFactor(0, 1)
-        splitter.setStretchFactor(1, 4)
-        splitter.setStretchFactor(2, 1)
-        splitter.setSizes([120, 430, 90])
+        splitter.setStretchFactor(0, 0)
+        splitter.setStretchFactor(1, 1)
+        splitter.setStretchFactor(2, 0)
+        splitter.setSizes([210, 470, 80])
         return tab
 
     def _build_project_group(self) -> QGroupBox:
         project_group = QGroupBox("Mechanical database")
+        project_group.setObjectName("panelInput")
         project_layout = QVBoxLayout(project_group)
         project_layout.setContentsMargins(8, 8, 8, 8)
         project_layout.setSpacing(6)
@@ -2184,6 +2340,7 @@ class MainWindow(QMainWindow):
 
     def _build_zemax_project_action_group(self) -> QGroupBox:
         project_group = QGroupBox("Zemax 工程文件 / 操作")
+        project_group.setObjectName("panelInput")
         project_layout = QVBoxLayout(project_group)
         project_layout.setContentsMargins(8, 8, 8, 8)
         project_layout.setSpacing(6)
@@ -2220,117 +2377,147 @@ class MainWindow(QMainWindow):
         project_layout.addLayout(action_layout)
         return project_group
 
+    def _new_import_tab(self) -> tuple[QWidget, QVBoxLayout]:
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(10)
+        return tab, layout
+
+    def _import_hint_label(self, text: str, tooltip: str = "") -> QLabel:
+        label = QLabel(text)
+        label.setWordWrap(True)
+        label.setStyleSheet("color: #6b7785;")
+        if tooltip:
+            label.setToolTip(tooltip)
+        return label
+
     def _build_zemax_pose_import_group(self) -> QGroupBox:
         import_group = QGroupBox("非序列镜片位移/旋转导入")
         layout = QVBoxLayout(import_group)
+        layout.setContentsMargins(10, 12, 10, 10)
+        layout.setSpacing(8)
 
         import_tabs = QTabWidget()
+        import_tabs.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
         import_tabs.addTab(self._build_zemax_steady_import_tab(), "稳态导入")
         import_tabs.addTab(self._build_zemax_transient_import_tab(), "瞬态导入")
         import_tabs.addTab(self._build_zemax_random_import_tab(), "随机振动导入")
         layout.addWidget(import_tabs)
 
-        self.zemax_pose_table = QTableWidget(0, 8)
-        self.zemax_pose_table.setHorizontalHeaderLabels(["名称/Comment", "X", "Y", "Z", "Rx", "Ry", "Rz", "来源"])
+        table_caption = QLabel("镜片刚体偏心/倾斜计算结果")
+        table_caption.setStyleSheet("color: #6b7785; padding: 2px 2px 0 2px;")
+        layout.addWidget(table_caption)
+
+        self.zemax_pose_table = QTableWidget(0, 9)
+        self.zemax_pose_table.setHorizontalHeaderLabels(
+            ["名称/Comment", "X", "Y", "Z", "Rx", "Ry", "Rz", "面形残差RMS", "来源"]
+        )
         self.zemax_pose_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.zemax_pose_table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.zemax_pose_table.setAlternatingRowColors(True)
+        self.zemax_pose_table.setMinimumHeight(200)
         self.zemax_pose_table.verticalHeader().setVisible(False)
-        self.zemax_pose_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
-        self.zemax_pose_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
+        header = self.zemax_pose_table.horizontalHeader()
+        header.setSectionResizeMode(QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(0, QHeaderView.Stretch)
+        header.setSectionResizeMode(8, QHeaderView.Stretch)
+        header.setMinimumSectionSize(56)
         layout.addWidget(self.zemax_pose_table, stretch=1)
         return import_group
 
     def _build_zemax_steady_import_tab(self) -> QWidget:
-        tab = QWidget()
-        layout = QVBoxLayout(tab)
-        label = QLabel("稳态导入：选择一个 Mechanical 结果导出文件夹，按 Comment 匹配并把单帧位移/旋转导入所选 Zemax 工程。")
-        label.setWordWrap(True)
-        layout.addWidget(label)
-
+        tab, layout = self._new_import_tab()
+        layout.addWidget(
+            self._import_hint_label(
+                "选择 Mechanical 结果文件夹，按 Comment 匹配并导入单帧位移/旋转。",
+                "选择 Mechanical 结果导出文件夹，并把镜片位移/旋转导入当前所选 Zemax 工程。",
+            )
+        )
         actions = QHBoxLayout()
+        actions.setSpacing(8)
         self.import_pose_button = QPushButton("选择文件夹并稳态导入")
         self.import_pose_button.setIcon(self.style().standardIcon(QStyle.SP_DialogApplyButton))
-        self.import_pose_button.setToolTip("选择 Mechanical 结果导出文件夹，并导入镜片位移/旋转到当前所选 Zemax 工程。")
+        self.import_pose_button.setMinimumHeight(30)
         self.import_pose_button.clicked.connect(self.import_mechanical_pose_to_zemax)
         self.steady_raytrace_button = QPushButton("稳态清空并追迹")
         self.steady_raytrace_button.setIcon(self.style().standardIcon(QStyle.SP_MediaPlay))
+        self.steady_raytrace_button.setMinimumHeight(30)
         self.steady_raytrace_button.clicked.connect(lambda: self.run_zemax_ray_trace(mode_label="稳态"))
         actions.addWidget(self.import_pose_button)
         actions.addWidget(self.steady_raytrace_button)
         actions.addStretch(1)
         layout.addLayout(actions)
-        layout.addStretch(1)
         return tab
 
     def _build_zemax_transient_import_tab(self) -> QWidget:
-        tab = QWidget()
-        layout = QVBoxLayout(tab)
-        label = QLabel("瞬态导入：选择按时间导出的 Mechanical 结果文件夹，逐时间帧写入 Zemax、清空追迹并保存 .zzz。")
-        label.setWordWrap(True)
-        layout.addWidget(label)
-
-        detector_layout = QHBoxLayout()
-        detector_layout.addWidget(QLabel("保存到ZZZ的探测器"))
-        self.zemax_time_series_detector_combo = QComboBox()
-        self.zemax_time_series_detector_combo.setMinimumContentsLength(36)
-        self.zemax_time_series_detector_combo.currentIndexChanged.connect(self.zemax_detector_selection_changed)
-        self._reset_zemax_detector_combo(self.zemax_time_series_detector_combo)
-        self.load_zemax_time_series_detectors_button = QPushButton("读取探测器")
-        self.load_zemax_time_series_detectors_button.setIcon(
-            self.style().standardIcon(QStyle.SP_FileDialogDetailedView)
+        tab, layout = self._new_import_tab()
+        layout.addWidget(
+            self._import_hint_label(
+                "选择按时间导出的结果文件夹，逐时间帧写入并保存为 DTS；点追迹按钮时弹出探测器选择框。",
+                "选择按时间导出的 Mechanical 结果文件夹，逐时间帧写入 Zemax、清空追迹并保存 .dts。"
+                "点“瞬态时间序列追迹并保存为 DTS”时会弹出探测器选择框。",
+            )
         )
-        self.load_zemax_time_series_detectors_button.clicked.connect(self.load_zemax_detectors)
-        detector_layout.addWidget(self.zemax_time_series_detector_combo, stretch=1)
-        detector_layout.addWidget(self.load_zemax_time_series_detectors_button)
-        layout.addLayout(detector_layout)
-
         actions = QHBoxLayout()
-        self.transient_time_series_button = QPushButton("瞬态时间序列追迹并保存ZZZ")
+        actions.setSpacing(8)
+        self.transient_import_button = QPushButton("选择文件夹并导入瞬态")
+        self.transient_import_button.setIcon(self.style().standardIcon(QStyle.SP_DialogApplyButton))
+        self.transient_import_button.setMinimumHeight(30)
+        self.transient_import_button.clicked.connect(self.import_mechanical_pose_to_zemax)
+        self.transient_time_series_button = QPushButton("瞬态追迹并保存为 DTS")
         self.transient_time_series_button.setIcon(self.style().standardIcon(QStyle.SP_MediaPlay))
+        self.transient_time_series_button.setMinimumHeight(30)
         self.transient_time_series_button.clicked.connect(self.run_zemax_time_series_trace)
-        self.transient_raytrace_button = QPushButton("瞬态清空并追迹")
-        self.transient_raytrace_button.setIcon(self.style().standardIcon(QStyle.SP_MediaPlay))
-        self.transient_raytrace_button.clicked.connect(lambda: self.run_zemax_ray_trace(mode_label="瞬态"))
+        actions.addWidget(self.transient_import_button)
         actions.addWidget(self.transient_time_series_button)
-        actions.addWidget(self.transient_raytrace_button)
         actions.addStretch(1)
         layout.addLayout(actions)
-        layout.addStretch(1)
         return tab
 
     def _build_zemax_random_import_tab(self) -> QWidget:
-        tab = QWidget()
-        layout = QVBoxLayout(tab)
-        label = QLabel("随机振动导入：把当前计算得到的镜片位移/转角绝对值作为标准差，按用户设定数量生成随机样本并逐样本追迹。")
-        label.setWordWrap(True)
-        layout.addWidget(label)
+        tab, layout = self._new_import_tab()
+        layout.addWidget(
+            self._import_hint_label(
+                "先选 1σ 结果文件夹导入并匹配镜片；再设数量后按多元正态 N(0,Σ) 逐样本追迹存 DTS。",
+                "随机振动：把 Mechanical 1σ 位移/旋转作为标准差，按多元正态生成设定数量随机样本并逐样本追迹保存为 DTS 时间序列；"
+                "点“随机振动追迹并保存为 DTS”时会弹出探测器选择框。",
+            )
+        )
+        import_row = QHBoxLayout()
+        import_row.setSpacing(8)
+        self.random_import_pose_button = QPushButton("选择文件夹并导入随机振动")
+        self.random_import_pose_button.setIcon(self.style().standardIcon(QStyle.SP_DialogApplyButton))
+        self.random_import_pose_button.setMinimumHeight(30)
+        self.random_import_pose_button.clicked.connect(self.import_mechanical_pose_to_zemax)
+        import_row.addWidget(self.random_import_pose_button)
+        import_row.addStretch(1)
+        layout.addLayout(import_row)
 
         controls = QHBoxLayout()
+        controls.setSpacing(8)
         controls.addWidget(QLabel("生成数量"))
         self.random_vibration_count_spin = QSpinBox()
         self.random_vibration_count_spin.setRange(1, 10000)
         self.random_vibration_count_spin.setValue(20)
+        self.random_vibration_count_spin.setMinimumHeight(28)
         controls.addWidget(self.random_vibration_count_spin)
-        self.random_vibration_trace_button = QPushButton("随机振动追迹并保存ZZZ")
+        self.random_vibration_trace_button = QPushButton("随机振动追迹并保存为 DTS")
         self.random_vibration_trace_button.setIcon(self.style().standardIcon(QStyle.SP_MediaPlay))
+        self.random_vibration_trace_button.setMinimumHeight(30)
         self.random_vibration_trace_button.clicked.connect(self.run_zemax_random_vibration_trace)
-        self.random_raytrace_button = QPushButton("随机振动清空并追迹")
-        self.random_raytrace_button.setIcon(self.style().standardIcon(QStyle.SP_MediaPlay))
-        self.random_raytrace_button.clicked.connect(lambda: self.run_zemax_ray_trace(mode_label="随机振动"))
         controls.addWidget(self.random_vibration_trace_button)
-        controls.addWidget(self.random_raytrace_button)
         controls.addStretch(1)
         layout.addLayout(controls)
-        layout.addStretch(1)
         return tab
 
     def _build_zemax_raytrace_launcher_group(self) -> QGroupBox:
         launcher_group = QGroupBox("非序列光线追迹 / 探测器")
+        launcher_group.setObjectName("panelStatus")
         layout = QHBoxLayout(launcher_group)
-        label = QLabel("探测器读取、结果摘要、ZZZ 播放和伪彩色图在弹出窗口中操作。")
+        label = QLabel("探测器读取、结果摘要、时间序列(DTS)和探测器图在弹出窗口中操作（图像可用鼠标滚轮缩放）。")
         label.setWordWrap(True)
-        self.open_zemax_raytrace_tab_button = QPushButton("打开探测器/ZZZ窗口")
+        self.open_zemax_raytrace_tab_button = QPushButton("打开探测器/时间序列(DTS)窗口")
         self.open_zemax_raytrace_tab_button.setIcon(self.style().standardIcon(QStyle.SP_FileDialogDetailedView))
         self.open_zemax_raytrace_tab_button.clicked.connect(self.open_zemax_raytrace_dialog)
         layout.addWidget(label, stretch=1)
@@ -2381,7 +2568,7 @@ class MainWindow(QMainWindow):
         self.read_selected_detector_button = QPushButton("快速查看选中探测器")
         self.read_selected_detector_button.setIcon(self.style().standardIcon(QStyle.SP_DialogApplyButton))
         self.read_selected_detector_button.clicked.connect(self.read_selected_zemax_detector_result)
-        self.export_selected_detector_button = QPushButton("完整导出CSV")
+        self.export_selected_detector_button = QPushButton("完整导出MATLAB")
         self.export_selected_detector_button.setIcon(self.style().standardIcon(QStyle.SP_DialogSaveButton))
         self.export_selected_detector_button.clicked.connect(self.export_selected_zemax_detector_result)
         detector_layout.addWidget(self.zemax_detector_combo, stretch=1)
@@ -2416,39 +2603,35 @@ class MainWindow(QMainWindow):
         result_panel_layout.addWidget(self.zemax_raytrace_result_log, stretch=1)
 
         preview_header = QHBoxLayout()
-        preview_header.addWidget(QLabel("伪彩色预览"))
+        preview_header.setSpacing(6)
+        self.open_zemax_dts_button = QPushButton("打开时间序列(DTS)")
+        self.open_zemax_dts_button.clicked.connect(self.open_zemax_time_series_dts)
+        self.play_zemax_dts_button = QPushButton("播放")
+        self.play_zemax_dts_button.setIcon(self.style().standardIcon(QStyle.SP_MediaPlay))
+        self.play_zemax_dts_button.clicked.connect(self.toggle_zemax_time_series_playback)
+        self.zemax_dts_frame_slider = QSlider(Qt.Horizontal)
+        self.zemax_dts_frame_slider.setRange(0, 0)
+        self.zemax_dts_frame_slider.setFixedWidth(150)
+        self.zemax_dts_frame_slider.valueChanged.connect(self.zemax_time_series_slider_changed)
+        self.zemax_dts_frame_label = QLabel("0/0")
+        preview_header.addWidget(self.open_zemax_dts_button)
+        preview_header.addWidget(self.play_zemax_dts_button)
+        preview_header.addWidget(self.zemax_dts_frame_slider)
+        preview_header.addWidget(self.zemax_dts_frame_label)
         preview_header.addStretch(1)
-        self.open_zemax_zzz_button = QPushButton("打开ZZZ")
-        self.open_zemax_zzz_button.clicked.connect(self.open_zemax_time_series_zzz)
-        self.play_zemax_zzz_button = QPushButton("播放")
-        self.play_zemax_zzz_button.clicked.connect(self.toggle_zemax_time_series_playback)
-        self.zemax_zzz_frame_slider = QSlider(Qt.Horizontal)
-        self.zemax_zzz_frame_slider.setRange(0, 0)
-        self.zemax_zzz_frame_slider.setFixedWidth(170)
-        self.zemax_zzz_frame_slider.valueChanged.connect(self.zemax_time_series_slider_changed)
-        self.zemax_zzz_frame_label = QLabel("0/0")
-        self.zemax_detector_zoom_out_button = QPushButton("缩小")
-        self.zemax_detector_zoom_out_button.clicked.connect(self.zoom_out_zemax_detector_preview)
         self.zemax_detector_zoom_fit_button = QPushButton("适应窗口")
         self.zemax_detector_zoom_fit_button.clicked.connect(self.fit_zemax_detector_preview)
-        self.zemax_detector_zoom_in_button = QPushButton("放大")
-        self.zemax_detector_zoom_in_button.clicked.connect(self.zoom_in_zemax_detector_preview)
         self.zemax_detector_zoom_label = QLabel("无图像")
-        preview_header.addWidget(self.open_zemax_zzz_button)
-        preview_header.addWidget(self.play_zemax_zzz_button)
-        preview_header.addWidget(self.zemax_zzz_frame_slider)
-        preview_header.addWidget(self.zemax_zzz_frame_label)
-        preview_header.addWidget(self.zemax_detector_zoom_out_button)
         preview_header.addWidget(self.zemax_detector_zoom_fit_button)
-        preview_header.addWidget(self.zemax_detector_zoom_in_button)
         preview_header.addWidget(self.zemax_detector_zoom_label)
         result_panel_layout.addLayout(preview_header)
 
-        self.zemax_detector_preview_label = QLabel("暂无伪彩色图")
+        self.zemax_detector_preview_label = QLabel("暂无伪彩色图（滚轮缩放）")
         self.zemax_detector_preview_label.setAlignment(Qt.AlignCenter)
         self.zemax_detector_preview_label.setMinimumSize(360, 300)
-        self.zemax_detector_preview_label.setStyleSheet("border: 1px solid #d0d5dd; background: #ffffff;")
-        self.zemax_detector_preview_scroll = QScrollArea()
+        self.zemax_detector_preview_label.setStyleSheet("border: 1px solid #e2e8ee; background: #ffffff; border-radius: 6px;")
+        self.zemax_detector_preview_scroll = DetectorPreviewScrollArea()
+        self.zemax_detector_preview_scroll.wheel_zoomed.connect(self.zoom_zemax_detector_preview)
         self.zemax_detector_preview_scroll.setWidget(self.zemax_detector_preview_label)
         self.zemax_detector_preview_scroll.setWidgetResizable(False)
         self.zemax_detector_preview_scroll.setAlignment(Qt.AlignCenter)
@@ -2463,6 +2646,7 @@ class MainWindow(QMainWindow):
 
     def _build_zemax_status_group(self) -> QGroupBox:
         status_group = QGroupBox("Zemax 状态")
+        status_group.setObjectName("panelStatus")
         layout = QGridLayout(status_group)
         layout.setColumnStretch(1, 1)
 
@@ -2487,6 +2671,7 @@ class MainWindow(QMainWindow):
 
     def _build_status_group(self) -> QGroupBox:
         status_group = QGroupBox("环境状态")
+        status_group.setObjectName("panelStatus")
         status_group.setMinimumWidth(620)
         status_group.setMaximumWidth(820)
         status_group.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
@@ -2499,30 +2684,69 @@ class MainWindow(QMainWindow):
         self.status_layout.setColumnStretch(2, 0)
         return status_group
 
-    def _build_operation_group(self) -> QGroupBox:
-        operation_group = QGroupBox("当前操作")
-        operation_layout = QGridLayout(operation_group)
-        operation_layout.setContentsMargins(8, 8, 8, 8)
-        operation_layout.setHorizontalSpacing(6)
-        operation_layout.setVerticalSpacing(4)
-        operation_layout.setColumnStretch(1, 1)
+    def _build_operation_panel(self) -> QWidget:
+        panel = QWidget()
+        panel.setObjectName("opPanel")
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(11, 10, 11, 11)
+        layout.setSpacing(6)
 
+        caption = QLabel("当前操作")
+        caption.setObjectName("opCaption")
+        layout.addWidget(caption)
+
+        state_row = QHBoxLayout()
+        state_row.setSpacing(7)
+        self.operation_state_dot = QLabel()
+        self.operation_state_dot.setObjectName("opDot")
+        self.operation_state_dot.setFixedSize(10, 10)
+        self.operation_state_label = QLabel("空闲")
+        self.operation_state_label.setObjectName("opState")
+        state_row.addWidget(self.operation_state_dot)
+        state_row.addWidget(self.operation_state_label)
+        state_row.addStretch(1)
+        self.operation_elapsed_label = QLabel("00:00")
+        self.operation_elapsed_label.setObjectName("opElapsed")
+        state_row.addWidget(self.operation_elapsed_label)
+        layout.addLayout(state_row)
+
+        stage_caption = QLabel("阶段")
+        stage_caption.setObjectName("opFieldCaption")
+        layout.addWidget(stage_caption)
         self.operation_stage_label = QLabel("空闲")
+        self.operation_stage_label.setObjectName("opStage")
         self.operation_stage_label.setWordWrap(True)
         self.operation_stage_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        layout.addWidget(self.operation_stage_label)
+
+        status_caption = QLabel("状态")
+        status_caption.setObjectName("opFieldCaption")
+        layout.addWidget(status_caption)
         self.operation_status_label = QLabel("等待操作")
+        self.operation_status_label.setObjectName("opStatus")
         self.operation_status_label.setWordWrap(True)
         self.operation_status_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        self.operation_elapsed_label = QLabel("00:00")
+        layout.addWidget(self.operation_status_label)
 
-        operation_layout.addWidget(QLabel("阶段"), 0, 0)
-        operation_layout.addWidget(self.operation_stage_label, 0, 1)
-        operation_layout.addWidget(QLabel("状态"), 1, 0)
-        operation_layout.addWidget(self.operation_status_label, 1, 1)
-        operation_layout.addWidget(QLabel("用时"), 2, 0)
-        operation_layout.addWidget(self.operation_elapsed_label, 2, 1)
-        operation_group.setMinimumWidth(300)
-        return operation_group
+        self._set_operation_state("idle")
+        return panel
+
+    def _set_operation_state(self, state: str) -> None:
+        self.operation_state = state
+        mapping = {
+            "idle": ("空闲", "#8a97a6"),
+            "running": ("运行中", "#14a08a"),
+            "done": ("完成", "#10895f"),
+            "error": ("失败", "#c7342e"),
+        }
+        word, color = mapping.get(state, ("空闲", "#8a97a6"))
+        dot = getattr(self, "operation_state_dot", None)
+        if dot is not None:
+            dot.setStyleSheet(f"background: {color}; border-radius: 5px;")
+        label = getattr(self, "operation_state_label", None)
+        if label is not None:
+            label.setText(word)
+            label.setStyleSheet(f"color: {color}; font-weight: 500;")
 
     def _build_modules_group(self) -> QGroupBox:
         modules_group = QGroupBox("当前工程分析模块")
@@ -2587,6 +2811,9 @@ class MainWindow(QMainWindow):
         refresh_action = QAction("检查环境", self)
         refresh_action.triggered.connect(self.refresh_status)
 
+        path_settings_action = QAction("路径设置", self)
+        path_settings_action.triggered.connect(self.open_path_settings_dialog)
+
         browse_project_action = QAction("选择文件", self)
         browse_project_action.triggered.connect(self.browse_project)
 
@@ -2611,6 +2838,7 @@ class MainWindow(QMainWindow):
         file_menu.addSeparator()
         file_menu.addAction(browse_zemax_project_action)
         file_menu.addSeparator()
+        file_menu.addAction(path_settings_action)
         file_menu.addAction(refresh_action)
         file_menu.addSeparator()
         file_menu.addAction(close_mechanical_action)
@@ -2621,316 +2849,135 @@ class MainWindow(QMainWindow):
     def _apply_style(self) -> None:
         style = """
             QWidget {
-                color: #172033;
-                selection-background-color: #0a84ff;
+                color: #1b2530;
+                selection-background-color: #14a08a;
                 selection-color: #ffffff;
+                font-size: 13px;
             }
-            QMainWindow,
-            QDialog,
-            QWidget#appShell {
-                background: #eef3f8;
+            QMainWindow, QDialog, QWidget#appShell { background: #eef2f5; }
+            QToolTip {
+                background: #ffffff; color: #1b2530;
+                border: 1px solid #cdd6df; border-radius: 6px; padding: 4px 8px;
             }
-            QLabel#titleLabel {
-                color: #142033;
-                padding: 4px 0 4px 2px;
-            }
+            QLabel#titleLabel { color: #16202b; padding: 4px 0 4px 2px; }
             QLabel#appDot {
-                background: #0a84ff;
-                border-radius: 8px;
-                min-width: 16px;
-                max-width: 16px;
-                min-height: 16px;
-                max-height: 16px;
-                margin-left: 2px;
+                background: #14a08a; border-radius: 8px;
+                min-width: 16px; max-width: 16px; min-height: 16px; max-height: 16px; margin-left: 2px;
             }
             QLabel#themePill {
-                color: #0a65d8;
-                background: rgba(230, 242, 255, 210);
-                border: 1px solid rgba(183, 217, 255, 220);
-                border-radius: 14px;
-                padding: 5px 12px;
+                color: #0d8a76; background: rgba(20,160,138,0.12);
+                border: 1px solid rgba(20,160,138,0.40); border-radius: 14px; padding: 5px 12px;
             }
-            QWidget#mainGlass {
-                background: rgba(255, 255, 255, 110);
-                border: 1px solid rgba(207, 217, 230, 210);
-                border-radius: 18px;
-            }
+            QWidget#mainGlass { background: #ffffff; border: 1px solid #e2e8ee; border-radius: 18px; }
             QWidget#sidebar {
-                background: rgba(247, 250, 253, 190);
-                border: 1px solid rgba(213, 224, 237, 210);
-                border-radius: 16px;
-                min-width: 150px;
-                max-width: 168px;
+                background: #f7f9fb; border: 1px solid #e2e8ee; border-radius: 16px;
+                min-width: 150px; max-width: 172px;
             }
-            QLabel#sidebarTitle {
-                color: #142033;
-                padding: 4px 8px 8px 8px;
-            }
+            QLabel#sidebarTitle { color: #16202b; padding: 4px 8px 8px 8px; font-weight: 500; }
             QLabel#sidebarHint {
-                color: #65758a;
-                background: rgba(255, 255, 255, 130);
-                border: 1px solid rgba(213, 224, 237, 180);
-                border-radius: 12px;
-                padding: 8px;
+                color: #8a97a6; background: #ffffff; border: 1px solid #e2e8ee;
+                border-radius: 12px; padding: 8px;
             }
-            QStackedWidget#mainStack {
-                background: transparent;
-                border: 0;
-            }
+            QStackedWidget#mainStack { background: transparent; border: 0; }
             QPushButton#navButton {
-                background: transparent;
-                border: 1px solid transparent;
-                border-radius: 12px;
-                color: #53637a;
-                min-height: 30px;
-                padding: 6px 10px;
-                text-align: left;
+                background: transparent; border: 1px solid transparent; border-radius: 12px;
+                color: #5b6776; min-height: 32px; padding: 6px 12px; text-align: left;
             }
-            QPushButton#navButton:hover {
-                background: rgba(255, 255, 255, 150);
-                border-color: rgba(213, 224, 237, 180);
-                color: #0a65d8;
-            }
+            QPushButton#navButton:hover { background: #eef2f5; color: #0d8a76; }
             QPushButton#navButton:checked {
-                background: rgba(255, 255, 255, 230);
-                border-color: #b7d9ff;
-                color: #0a65d8;
+                background: rgba(20,160,138,0.12); border: 1px solid rgba(20,160,138,0.50); color: #0d8a76;
             }
-            QWidget#projectToolbar {
-                background: rgba(255, 255, 255, 210);
-                border: 1px solid rgba(207, 217, 230, 230);
-                border-radius: 18px;
-            }
-            QLabel#toolbarTitle {
-                color: #142033;
-            }
-            QLabel#toolbarCaption {
-                color: #53637a;
-            }
-            QMenuBar {
-                background: rgba(255, 255, 255, 165);
-                border-bottom: 1px solid rgba(205, 216, 229, 180);
-                padding: 3px 8px;
-            }
-            QMenuBar::item {
-                background: transparent;
-                border-radius: 8px;
-                padding: 5px 10px;
-            }
-            QMenuBar::item:selected {
-                background: rgba(10, 132, 255, 30);
-                color: #0a65d8;
-            }
-            QMenu {
-                background: rgba(250, 252, 255, 245);
-                border: 1px solid #cfd9e6;
-                border-radius: 12px;
-                padding: 6px;
-            }
-            QMenu::item {
-                border-radius: 8px;
-                padding: 6px 24px;
-            }
-            QMenu::item:selected {
-                background: #e6f2ff;
-                color: #0a65d8;
-            }
-            QTabWidget::pane {
-                background: rgba(255, 255, 255, 150);
-                border: 1px solid rgba(207, 217, 230, 210);
-                border-radius: 18px;
-                top: -1px;
-            }
-            QTabBar::tab {
-                background: rgba(255, 255, 255, 120);
-                border: 1px solid rgba(207, 217, 230, 190);
-                border-radius: 14px;
-                color: #53637a;
-                min-height: 28px;
-                min-width: 104px;
-                margin: 0 4px 8px 0;
-                padding: 5px 16px;
-            }
-            QTabBar::tab:selected {
-                background: #ffffff;
-                border-color: #9dccff;
-                color: #0a65d8;
-            }
-            QTabBar::tab:hover {
-                background: #f7fbff;
-                color: #0a65d8;
-            }
+            QWidget#projectToolbar { background: #ffffff; border: 1px solid #e2e8ee; border-radius: 18px; }
+            QLabel#toolbarTitle { color: #16202b; }
+            QLabel#toolbarCaption { color: #5b6776; }
+            QMenuBar { background: transparent; border-bottom: 1px solid #e2e8ee; padding: 3px 8px; }
+            QMenuBar::item { background: transparent; border-radius: 8px; padding: 5px 10px; color: #3a4654; }
+            QMenuBar::item:selected { background: rgba(20,160,138,0.14); color: #0d8a76; }
+            QMenu { background: #ffffff; border: 1px solid #e2e8ee; border-radius: 12px; padding: 6px; color: #1b2530; }
+            QMenu::item { border-radius: 8px; padding: 6px 24px; }
+            QMenu::item:selected { background: rgba(20,160,138,0.14); color: #0d8a76; }
+
             QGroupBox {
-                background: rgba(255, 255, 255, 185);
-                border: 1px solid rgba(207, 217, 230, 230);
-                border-radius: 18px;
-                margin-top: 18px;
-                padding: 16px 12px 12px 12px;
+                background: #ffffff; border: 1px solid #e2e8ee; border-radius: 14px;
+                margin-top: 10px; padding-top: 8px; font-weight: 500;
             }
             QGroupBox::title {
-                subcontrol-origin: margin;
-                subcontrol-position: top left;
-                color: #142033;
-                left: 14px;
-                padding: 0 8px;
+                subcontrol-origin: margin; subcontrol-position: top left;
+                left: 12px; padding: 2px 6px; color: #5b6776;
             }
+
+            QTabWidget::pane { background: #fbfcfd; border: 1px solid #e2e8ee; border-radius: 12px; top: -1px; }
+            QTabBar::tab {
+                background: transparent; color: #5b6776; border: 1px solid transparent;
+                border-radius: 10px; padding: 6px 16px; margin: 2px 4px 2px 0;
+            }
+            QTabBar::tab:hover { background: #eef2f5; color: #0d8a76; }
+            QTabBar::tab:selected {
+                background: rgba(20,160,138,0.12); border: 1px solid rgba(20,160,138,0.45); color: #0d8a76;
+            }
+
             QPushButton {
-                background: rgba(255, 255, 255, 210);
-                border: 1px solid #c9d5e3;
-                border-radius: 12px;
-                color: #172033;
-                min-height: 32px;
-                padding: 5px 14px;
+                background: #ffffff; color: #26323f; border: 1px solid #d4dce4;
+                border-radius: 9px; padding: 6px 14px; min-height: 18px;
             }
-            QPushButton:hover {
-                background: #f7fbff;
-                border-color: #9dccff;
-                color: #0a65d8;
+            QPushButton:hover { background: #f2f6f9; border-color: #b9c6d2; }
+            QPushButton:pressed { background: #e8eef3; }
+            QPushButton:focus { border-color: #14a08a; }
+            QPushButton:disabled { color: #aab4bf; background: #f6f8fa; border-color: #e6ebf0; }
+
+            QLineEdit, QComboBox, QSpinBox, QDoubleSpinBox, QPlainTextEdit, QTextEdit {
+                background: #ffffff; color: #1b2530; border: 1px solid #d4dce4;
+                border-radius: 8px; padding: 4px 8px; selection-background-color: #14a08a; selection-color: #ffffff;
             }
-            QPushButton:pressed {
-                background: #d9ecff;
-                border-color: #0a84ff;
+            QLineEdit:focus, QComboBox:focus, QSpinBox:focus, QPlainTextEdit:focus { border-color: #14a08a; }
+            QComboBox::drop-down { border: 0; width: 22px; }
+            QComboBox QAbstractItemView {
+                background: #ffffff; color: #1b2530; border: 1px solid #e2e8ee;
+                selection-background-color: rgba(20,160,138,0.18); selection-color: #134e42; outline: 0;
             }
-            QPushButton:disabled {
-                background: rgba(236, 242, 248, 180);
-                color: #9aa8b8;
-                border-color: #d8e2ef;
+            QSpinBox::up-button, QSpinBox::down-button { background: #eef2f5; border: 0; width: 16px; }
+
+            QTableWidget, QTableView {
+                background: #ffffff; alternate-background-color: #f6f8fa; color: #26323f;
+                gridline-color: #e6ebf0; border: 1px solid #e2e8ee; border-radius: 8px;
+                selection-background-color: rgba(20,160,138,0.16); selection-color: #134e42;
             }
-            QPushButton#primaryAction {
-                background: #0a84ff;
-                border-color: #0a78ea;
-                color: #ffffff;
-            }
-            QPushButton#primaryAction:hover {
-                background: #1b8fff;
-                border-color: #006fdd;
-                color: #ffffff;
-            }
-            QPushButton#primaryAction:pressed {
-                background: #006fdd;
-                border-color: #0062c7;
-            }
-            QPushButton#dangerButton {
-                background: rgba(255, 244, 242, 230);
-                border-color: #f2b8b5;
-                color: #c7342e;
-            }
-            QPushButton#dangerButton:hover {
-                background: #ffecea;
-                border-color: #ee928d;
-                color: #b62520;
-            }
-            QLineEdit,
-            QComboBox,
-            QSpinBox {
-                background: rgba(255, 255, 255, 230);
-                border: 1px solid #cbd8e6;
-                border-radius: 11px;
-                color: #172033;
-                min-height: 30px;
-                padding: 4px 10px;
-            }
-            QLineEdit:focus,
-            QComboBox:focus,
-            QSpinBox:focus {
-                border: 1px solid #0a84ff;
-                background: #ffffff;
-            }
-            QComboBox::drop-down {
-                border: 0;
-                width: 24px;
-            }
-            QCheckBox {
-                spacing: 8px;
-                color: #253246;
-            }
-            QCheckBox::indicator {
-                width: 16px;
-                height: 16px;
-                border-radius: 5px;
-                border: 1px solid #b9c7d8;
-                background: #ffffff;
-            }
-            QCheckBox::indicator:checked {
-                background: #0a84ff;
-                border-color: #0a84ff;
-            }
-            QTableWidget {
-                background: rgba(255, 255, 255, 220);
-                alternate-background-color: #f7fafe;
-                border: 1px solid #d4deea;
-                border-radius: 12px;
-                color: #172033;
-                gridline-color: #e1e8f0;
-                selection-background-color: #d9ecff;
-                selection-color: #142033;
-            }
-            QTableWidget::item {
-                padding: 5px 7px;
-            }
-            QTableWidget::item:selected {
-                background: #d9ecff;
-                color: #142033;
-            }
+            QTableWidget::item, QTableView::item { padding: 4px 6px; }
             QHeaderView::section {
-                background: #f1f6fb;
-                border: 0;
-                border-right: 1px solid #dbe4ee;
-                border-bottom: 1px solid #dbe4ee;
-                color: #53637a;
-                padding: 6px 8px;
+                background: #f4f7f9; color: #5b6776; border: 0;
+                border-right: 1px solid #e6ebf0; border-bottom: 1px solid #e6ebf0; padding: 6px 8px;
             }
-            QPlainTextEdit {
-                background: #111a2a;
-                border: 1px solid #26364a;
-                border-radius: 14px;
-                color: #e8eef7;
-                padding: 9px;
+            QTableCornerButton::section { background: #f4f7f9; border: 0; }
+
+            QScrollArea { background: transparent; border: 0; }
+            QCheckBox { color: #26323f; spacing: 6px; }
+            QCheckBox::indicator {
+                width: 16px; height: 16px; border: 1px solid #c4cdd6; border-radius: 4px; background: #ffffff;
             }
-            QScrollArea {
-                background: transparent;
-                border: 1px solid #d4deea;
-                border-radius: 12px;
-            }
-            QSplitter::handle {
-                background: transparent;
-            }
-            QSplitter::handle:horizontal {
-                width: 10px;
-            }
-            QSplitter::handle:vertical {
-                height: 10px;
-            }
-            QScrollBar:vertical,
-            QScrollBar:horizontal {
-                background: transparent;
-                border: 0;
-                margin: 2px;
-            }
-            QScrollBar:vertical {
-                width: 10px;
-            }
-            QScrollBar:horizontal {
-                height: 10px;
-            }
-            QScrollBar::handle {
-                background: rgba(117, 133, 153, 120);
-                border-radius: 5px;
-            }
-            QScrollBar::handle:hover {
-                background: rgba(10, 132, 255, 150);
-            }
-            QScrollBar::add-line,
-            QScrollBar::sub-line {
-                width: 0;
-                height: 0;
-            }
-            QLabel[status="ok"] {
-                color: #168a4d;
-            }
-            QLabel[status="missing"] {
-                color: #c7342e;
-            }
+            QCheckBox::indicator:checked { background: #14a08a; border-color: #14a08a; }
+
+            QScrollBar:vertical { background: transparent; width: 10px; margin: 2px; }
+            QScrollBar::handle:vertical { background: #cad3dc; border-radius: 5px; min-height: 24px; }
+            QScrollBar::handle:vertical:hover { background: #aab6c2; }
+            QScrollBar:horizontal { background: transparent; height: 10px; margin: 2px; }
+            QScrollBar::handle:horizontal { background: #cad3dc; border-radius: 5px; min-width: 24px; }
+            QScrollBar::handle:horizontal:hover { background: #aab6c2; }
+            QScrollBar::add-line, QScrollBar::sub-line { width: 0; height: 0; }
+            QScrollBar::add-page, QScrollBar::sub-page { background: transparent; }
+            QSplitter::handle { background: transparent; }
+            QSplitter::handle:hover { background: #dde4ea; }
+
+            QGroupBox#panelInput { background: #f1f6fc; border: 1px solid #dbe7f3; }
+            QGroupBox#panelStatus { background: #eef8f4; border: 1px solid #d2ebe2; }
+            QWidget#opPanel { background: #eef8f4; border: 1px solid #d2ebe2; border-radius: 12px; }
+            QLabel#opCaption { color: #8a97a6; font-weight: 500; }
+            QLabel#opFieldCaption { color: #8a97a6; font-size: 11px; }
+            QLabel#opStage { color: #16202b; font-weight: 500; }
+            QLabel#opStatus { color: #5b6776; font-size: 12px; }
+            QLabel#opElapsed { color: #16202b; }
+
+            QLabel[status="ok"] { color: #10895f; }
+            QLabel[status="missing"] { color: #c7342e; }
         """
         app = QApplication.instance()
         if app is not None:
@@ -3076,7 +3123,7 @@ class MainWindow(QMainWindow):
             details = "\n".join(errors[:6])
             QMessageBox.warning(
                 self,
-                "未读取到位姿",
+                "未读取到刚体偏心/倾斜",
                 f"所选 Mechanical 导出文件夹没有找到可计算镜片位移/旋转的数据:\n{folder}\n\n"
                 + details,
             )
@@ -3106,7 +3153,7 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(
                 self,
                 "未找到 Mechanical 导出",
-                "没有在软件 exports 目录中找到可用于 Zemax 位姿计算的 Mechanical 结果导出文件夹。"
+                "没有在软件 exports 目录中找到可用于 Zemax 刚体偏心/倾斜计算的 Mechanical 结果导出文件夹。"
                 "请先在求解结果窗口导出包含镜片 UX/UY/UZ 的 TXT 结果。",
             )
             return
@@ -3136,7 +3183,7 @@ class MainWindow(QMainWindow):
         details = "\n".join(errors[:6])
         QMessageBox.warning(
             self,
-            "未读取到位姿",
+            "未读取到刚体偏心/倾斜",
             "已自动检查最近的 Mechanical 导出文件夹，但没有找到可计算镜片位移/旋转的数据。\n\n"
             + details,
         )
@@ -3161,7 +3208,7 @@ class MainWindow(QMainWindow):
 
     def set_zemax_pose_log(self, lines: list[str]) -> None:
         if lines:
-            self.append_log("Zemax 位姿计算:\n" + "\n".join(lines))
+            self.append_log("Zemax 刚体偏心/倾斜计算:\n" + "\n".join(lines))
 
     def populate_zemax_pose_table(self, records: list[dict[str, object]]) -> None:
         self.zemax_pose_table.setRowCount(len(records))
@@ -3174,6 +3221,11 @@ class MainWindow(QMainWindow):
                 f"{float(record.get('rx') or 0):.9g}",
                 f"{float(record.get('ry') or 0):.9g}",
                 f"{float(record.get('rz') or 0):.9g}",
+                (
+                    f"{float(record['rms_residual']):.3g}"
+                    if record.get("rms_residual") is not None
+                    else "—"
+                ),
                 str(record.get("source") or ""),
             ]
             for column, value in enumerate(values):
@@ -3194,7 +3246,7 @@ class MainWindow(QMainWindow):
 
     def zemax_detector_combos(self) -> list[QComboBox]:
         combos: list[QComboBox] = []
-        for name in ("zemax_time_series_detector_combo", "zemax_detector_combo"):
+        for name in ("zemax_detector_combo",):
             combo = getattr(self, name, None)
             if isinstance(combo, QComboBox):
                 combos.append(combo)
@@ -3214,6 +3266,41 @@ class MainWindow(QMainWindow):
         y_pixels = detector.get("y_pixels")
         pixel_text = f"{x_pixels} x {y_pixels}" if x_pixels and y_pixels else "像素未知"
         return f"{object_index:03d} | {comment or '(无 Comment)'} | {type_name} | {pixel_text}"
+
+    def zemax_import_object_label(self, item: dict[str, object]) -> str:
+        try:
+            object_index = int(item.get("object_index") or 0)
+        except (TypeError, ValueError):
+            object_index = 0
+        comment = str(item.get("comment") or "").strip()
+        source_name = str(item.get("source_name") or item.get("name") or "").strip()
+        display_name = comment or source_name or "(无 Comment)"
+        prefix = f"{object_index:03d}" if object_index > 0 else "---"
+        if source_name and comment and source_name != comment:
+            return f"{prefix} {display_name}（Mechanical={source_name}）"
+        return f"{prefix} {display_name}"
+
+    def zemax_import_object_summary(self, items: object, *, limit: int | None = None) -> str:
+        labels: list[str] = []
+        seen: set[str] = set()
+        for item in list(items or []):
+            if not isinstance(item, dict):
+                continue
+            label = self.zemax_import_object_label(item)
+            if label in seen:
+                continue
+            seen.add(label)
+            labels.append(label)
+        if limit is not None and len(labels) > limit:
+            shown = labels[:limit]
+            shown.append(f"... 其余 {len(labels) - limit} 个")
+            labels = shown
+        return "，".join(labels)
+
+    def append_zemax_import_objects_log(self, prefix: str, items: object, *, limit: int | None = None) -> None:
+        summary = self.zemax_import_object_summary(items, limit=limit)
+        if summary:
+            self.append_log(f"{prefix}: {summary}")
 
     def selected_zemax_detector_number(self) -> int | None:
         for combo in self.zemax_detector_combos():
@@ -3375,35 +3462,42 @@ class MainWindow(QMainWindow):
         if not zemax_project.exists():
             QMessageBox.warning(self, "Zemax 工程不存在", f"所选 Zemax 工程文件不存在:\n{zemax_project}")
             return
-        detector_number = self.selected_zemax_detector_number()
+        if not self.zemax_detectors:
+            self._time_series_pending = True
+            self.append_log("瞬态时间序列追迹: 尚未读取探测器，先后台读取探测器列表，读取后将弹出选择框。")
+            self.load_zemax_detectors()
+            return
+        self._continue_time_series_trace()
+
+    def _continue_time_series_trace(self) -> None:
+        if self.active_thread is not None:
+            QMessageBox.information(self, "操作正在执行", "当前操作还没有结束。")
+            return
+        zemax_project = self.current_zemax_project_path()
+        if zemax_project is None or not zemax_project.exists():
+            QMessageBox.warning(self, "未选择 Zemax 工程", "请先选择 Zemax 工程文件。")
+            return
+        if not self.zemax_detectors:
+            QMessageBox.warning(self, "未读取到探测器", "未能读取到探测器列表，无法选择 Detector。")
+            return
+        detector_number = self._prompt_choose_zemax_detector()
         if detector_number is None:
-            QMessageBox.warning(self, "未选择探测器", "请先读取探测器列表，并选择用于形成光斑的 Detector。")
             return
-        export_folder = self.choose_zemax_mechanical_export_folder()
-        if export_folder is None:
+        export_folder = self.selected_mechanical_export_folder
+        if export_folder is None or not export_folder.exists() or not export_folder.is_dir():
+            QMessageBox.warning(self, "未导入瞬态", "请先点「选择文件夹并导入瞬态」选择 Mechanical 时间序列结果文件夹。")
             return
-        if not export_folder.exists() or not export_folder.is_dir():
-            QMessageBox.warning(self, "导出文件夹不存在", f"所选 Mechanical 导出文件夹不存在:\n{export_folder}")
+        if not self.apply_zemax_pose_records_from_folder(export_folder, source_label="瞬态时间序列导出"):
             return
 
         default_dir = zemax_project.parent / "zemax_time_series_results"
         default_dir.mkdir(parents=True, exist_ok=True)
-        default_path = default_dir / f"{zemax_project.stem}_detector_{detector_number:03d}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.zzz"
-        output_file_text, _ = QFileDialog.getSaveFileName(
-            self,
-            "保存 Zemax 时间序列光斑数据",
-            str(default_path),
-            "Zemax Time Series Data (*.zzz);;All Files (*)",
-        )
-        if not output_file_text:
-            return
-        output_file = Path(output_file_text)
-        if output_file.suffix.lower() != ".zzz":
-            output_file = output_file.with_suffix(".zzz")
+        # 自动保存到默认结果文件夹,不再弹「保存」对话框选位置。
+        output_file = default_dir / f"{zemax_project.stem}_detector_{detector_number:03d}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.dts"
 
         self.zemax_time_series_timer.stop()
         self.set_operation_buttons_enabled(False)
-        self.start_operation_status("Zemax 时间序列追迹", "逐帧写入瞬态形变、追迹并保存 .zzz")
+        self.start_operation_status("Zemax 时间序列追迹", "逐帧写入瞬态形变、追迹并保存 .dts")
         self.append_log(
             "开始 Zemax 时间序列追迹: "
             f"工程={zemax_project}，Detector={detector_number}，"
@@ -3443,15 +3537,56 @@ class MainWindow(QMainWindow):
         if not zemax_project.exists():
             QMessageBox.warning(self, "Zemax 工程不存在", f"所选 Zemax 工程文件不存在:\n{zemax_project}")
             return
-        detector_number = self.selected_zemax_detector_number()
+        # 还没有探测器列表 -> 先后台读取,读完自动弹出探测器选择框继续
+        if not self.zemax_detectors:
+            self._random_trace_pending = True
+            self.append_log("随机振动追迹: 尚未读取探测器，先后台读取探测器列表，读取后将弹出选择框。")
+            self.load_zemax_detectors()
+            return
+        self._continue_random_vibration_trace()
+
+    def _prompt_choose_zemax_detector(self) -> int | None:
+        """弹出对话框,从已读取的探测器列表里直接选一个,返回其对象编号。"""
+        detectors = [d for d in self.zemax_detectors if isinstance(d, dict)]
+        if not detectors:
+            return None
+        labels = [self.zemax_detector_combo_label(d) for d in detectors]
+        current = self.selected_zemax_detector_number()
+        preselect = next(
+            (i for i, d in enumerate(detectors) if int(d.get("object_index") or 0) == (current or -1)),
+            0,
+        )
+        label, ok = QInputDialog.getItem(
+            self,
+            "选择探测器",
+            "用于随机振动追迹的 Detector：",
+            labels,
+            preselect,
+            False,
+        )
+        if not ok:
+            return None
+        return int(detectors[labels.index(label)].get("object_index") or 0)
+
+    def _continue_random_vibration_trace(self) -> None:
+        if self.active_thread is not None:
+            QMessageBox.information(self, "操作正在执行", "当前操作还没有结束。")
+            return
+        zemax_project = self.current_zemax_project_path()
+        if zemax_project is None or not zemax_project.exists():
+            QMessageBox.warning(self, "未选择 Zemax 工程", "请先选择 Zemax 工程文件。")
+            return
+        if not self.zemax_detectors:
+            QMessageBox.warning(self, "未读取到探测器", "未能读取到探测器列表，无法选择 Detector。")
+            return
+        detector_number = self._prompt_choose_zemax_detector()
         if detector_number is None:
-            QMessageBox.warning(self, "未选择探测器", "请先读取探测器列表，并选择用于形成光斑的 Detector。")
             return
-        export_folder = self.choose_zemax_mechanical_export_folder()
-        if export_folder is None:
+        export_folder = self.selected_mechanical_export_folder
+        if export_folder is None or not export_folder.exists() or not export_folder.is_dir():
+            QMessageBox.warning(self, "未导入随机振动", "请先点「选择文件夹并导入随机振动」选择 Mechanical 1σ 结果文件夹。")
             return
-        if not export_folder.exists() or not export_folder.is_dir():
-            QMessageBox.warning(self, "导出文件夹不存在", f"所选 Mechanical 导出文件夹不存在:\n{export_folder}")
+        if not self.apply_zemax_pose_records_from_folder(export_folder, source_label="随机振动 1σ 导出"):
             return
 
         sample_count = 20
@@ -3459,22 +3594,12 @@ class MainWindow(QMainWindow):
             sample_count = int(self.random_vibration_count_spin.value())
         default_dir = zemax_project.parent / "zemax_random_vibration_results"
         default_dir.mkdir(parents=True, exist_ok=True)
-        default_path = default_dir / f"{zemax_project.stem}_random_detector_{detector_number:03d}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.zzz"
-        output_file_text, _ = QFileDialog.getSaveFileName(
-            self,
-            "保存 Zemax 随机振动光斑数据",
-            str(default_path),
-            "Zemax Random Vibration Data (*.zzz);;All Files (*)",
-        )
-        if not output_file_text:
-            return
-        output_file = Path(output_file_text)
-        if output_file.suffix.lower() != ".zzz":
-            output_file = output_file.with_suffix(".zzz")
+        # 自动保存到默认结果文件夹,不再弹「保存」对话框选位置。
+        output_file = default_dir / f"{zemax_project.stem}_random_detector_{detector_number:03d}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.dts"
 
         self.zemax_time_series_timer.stop()
         self.set_operation_buttons_enabled(False)
-        self.start_operation_status("Zemax 随机振动追迹", f"生成 {sample_count} 个随机样本、逐样本追迹并保存 .zzz")
+        self.start_operation_status("Zemax 随机振动追迹", f"生成 {sample_count} 个随机样本、逐样本追迹并保存 .dts")
         self.append_log(
             "开始 Zemax 随机振动追迹: "
             f"工程={zemax_project}，Detector={detector_number}，样本数={sample_count}，"
@@ -3535,7 +3660,7 @@ class MainWindow(QMainWindow):
                 self.set_zemax_detector_preview(cached_image)
                 lines = [
                     f"工程: {self.current_zemax_info.get('system_file') or zemax_project}",
-                    f"读取方式: 使用缓存的 Detector {detector_number} 快速预览",
+                    f"读取方式: 使用缓存的 Detector {detector_number} 全分辨率读取结果",
                     "",
                 ]
                 lines.extend(self.zemax_detector_result_lines(cached))
@@ -3550,13 +3675,13 @@ class MainWindow(QMainWindow):
         self.set_operation_buttons_enabled(False)
         self.start_operation_status(
             "Zemax 探测器结果",
-            f"完整导出 Detector {detector_number}" if export_csv else f"快速读取 Detector {detector_number} 预览",
+            f"完整导出 Detector {detector_number}（MATLAB）" if export_csv else f"全分辨率读取 Detector {detector_number}",
         )
         self.append_log(
             (
-                "开始完整导出 Zemax Detector 结果: "
+                "开始完整导出 Zemax Detector 结果为 MATLAB(.mat): "
                 if export_csv
-                else "开始快速读取 Zemax Detector 预览: "
+                else "开始全分辨率读取 Zemax Detector 结果: "
             )
             + f"工程={zemax_project}，Detector={detector_number}"
         )
@@ -3566,8 +3691,7 @@ class MainWindow(QMainWindow):
             "export_detector_result" if export_csv else "read_detector_result",
             zemax_project,
             detector_number,
-            write_csv=export_csv,
-            preview_max_dimension=None if export_csv else DETECTOR_PREVIEW_MAX_DIMENSION,
+            export_matlab=export_csv,
         )
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
@@ -3638,7 +3762,7 @@ class MainWindow(QMainWindow):
                 f"CPU逻辑核心检测: {cpu_cores.get('detected_cpu_cores')}",
                 f"CPU核心请求/实际: {cpu_cores.get('requested_cpu_cores')} / {cpu_cores.get('configured_cpu_cores')}",
                 f"CPU核心设置状态: {'已启用' if cpu_cores.get('supported') else '未启用'}，{cpu_cores.get('message') or ''}",
-                "下一步: 在下拉框选择 Detector，然后点击“快速查看选中探测器”；需要全量矩阵时再点“完整导出CSV”。",
+                "下一步: 在下拉框选择 Detector，然后点击“快速查看选中探测器”；需要保存全量矩阵时再点“完整导出MATLAB”。",
             ]
             self.zemax_raytrace_result_log.setPlainText("\n".join(lines))
             self.update_operation_progress(
@@ -3656,6 +3780,7 @@ class MainWindow(QMainWindow):
         elif operation in {"time_series_trace", "random_vibration_trace"}:
             cpu_cores = result.get("cpu_cores") if isinstance(result.get("cpu_cores"), dict) else {}
             output_file = Path(str(result.get("output_file") or ""))
+            raw_output_file = Path(str(result.get("raw_output_file") or ""))
             frame_count = int(result.get("frame_count") or 0)
             detector = result.get("detector") if isinstance(result.get("detector"), dict) else {}
             is_random = operation == "random_vibration_trace"
@@ -3663,30 +3788,59 @@ class MainWindow(QMainWindow):
                 f"工程: {system_file or result.get('project_file') or '未命名工程'}",
                 f"Detector: {self.zemax_detector_summary_line(detector) if detector else '未知'}",
                 f"{'随机样本数' if is_random else '时间帧数'}: {frame_count}",
-                f"输出 ZZZ: {output_file}",
+                f"快速播放 DTS: {output_file}",
+                f"MATLAB 原始数据 DTS: {raw_output_file}",
                 f"CPU逻辑核心检测: {cpu_cores.get('detected_cpu_cores')}",
                 f"CPU核心请求/实际: {cpu_cores.get('requested_cpu_cores')} / {cpu_cores.get('configured_cpu_cores')}",
                 f"耗时: {self._format_float(result.get('elapsed_seconds'))} s",
-                "保存格式: .zzz ZIP 容器，包含 manifest.json、每帧 detector.csv 和 MATLAB 读取脚本。",
+                "保存格式: 快速播放文件包含全分辨率 detector.png；MATLAB 原始数据文件包含 detector.csv 和读取脚本。",
             ]
             if is_random:
                 lines.insert(3, f"随机振动样本数: {result.get('sample_count')}")
             self.zemax_raytrace_result_log.setPlainText("\n".join(lines))
             if output_file.exists():
                 try:
-                    self.load_zemax_time_series_zzz_file(output_file)
+                    self.load_zemax_time_series_dts_file(output_file)
                 except Exception as exc:
-                    self.append_log(f"ZZZ 已生成，但自动加载播放失败: {exc}")
+                    self.append_log(f"DTS 已生成，但自动加载播放失败: {exc}")
             self.update_operation_progress(
                 {
                     "stage": "Zemax 随机振动追迹完成" if is_random else "Zemax 时间序列追迹完成",
-                    "status": f"已保存 {frame_count} 帧到 {output_file}",
+                    "status": f"已保存 {frame_count} 帧；快速播放={output_file.name}，MATLAB原始={raw_output_file.name}",
                 }
             )
             self.append_log(
                 f"{'Zemax 随机振动追迹完成' if is_random else 'Zemax 时间序列追迹完成'}: "
-                f"帧数={frame_count}，ZZZ={output_file}"
+                f"帧数={frame_count}，快速播放DTS={output_file}，MATLAB原始数据DTS={raw_output_file}"
             )
+            frames = [item for item in list(result.get("frames") or []) if isinstance(item, dict)]
+            unique_imported_objects: list[dict[str, object]] = []
+            seen_imported: set[str] = set()
+            for frame in frames:
+                for item in list(frame.get("imported_objects") or []):
+                    if not isinstance(item, dict):
+                        continue
+                    label = self.zemax_import_object_label(item)
+                    if label in seen_imported:
+                        continue
+                    seen_imported.add(label)
+                    unique_imported_objects.append(item)
+            self.append_zemax_import_objects_log(
+                "Zemax 随机振动导入镜片对象汇总" if is_random else "Zemax 时间序列导入镜片对象汇总",
+                unique_imported_objects,
+            )
+            for frame in frames[:8]:
+                frame_index = frame.get("frame_index")
+                time_label = str(frame.get("time_label") or "").strip()
+                imported = frame.get("imported_objects") or []
+                prefix = (
+                    f"Zemax 随机振动样本 {frame_index} 导入镜片"
+                    if is_random
+                    else f"Zemax 时间帧 {frame_index}（{time_label or '无时间标签'}）导入镜片"
+                )
+                self.append_zemax_import_objects_log(prefix, imported, limit=20)
+            if len(frames) > 8:
+                self.append_log(f"Zemax 导入镜片逐帧日志仅显示前 8 帧；其余 {len(frames) - 8} 帧已写入 DTS manifest/pose.json。")
         elif operation in {"read_detector_result", "export_detector_result"}:
             detector_result = result.get("result") if isinstance(result.get("result"), dict) else {}
             detector = detector_result.get("detector") if isinstance(detector_result.get("detector"), dict) else {}
@@ -3701,9 +3855,9 @@ class MainWindow(QMainWindow):
             lines = [
                 f"工程: {system_file or '未命名工程'}",
                 (
-                    f"读取方式: 完整导出当前选中的 Detector {detector_number}"
+                    f"读取方式: 完整导出当前选中的 Detector {detector_number}（MATLAB .mat）"
                     if operation == "export_detector_result"
-                    else f"读取方式: 快速预览当前选中的 Detector {detector_number}"
+                    else f"读取方式: 全分辨率读取当前选中的 Detector {detector_number}"
                 ),
                 f"输出文件夹: {result.get('output_dir')}",
                 f"伪彩色比例: {'对数' if result.get('log_scale') else '线性'}",
@@ -3713,10 +3867,10 @@ class MainWindow(QMainWindow):
             self.zemax_raytrace_result_log.setPlainText("\n".join(lines))
             self.zemax_detector_selection_changed()
             self.update_operation_progress({"stage": "Zemax 探测器结果", "status": f"Detector {detector_number} 已读取"})
-            csv_text = detector_result.get("csv_path") or "预览模式未导出"
+            mat_text = detector_result.get("mat_path") or "未导出（仅查看，未保存数据文件）"
             self.append_log(
                 f"Zemax Detector {detector_number} 结果读取完成: "
-                f"CSV={csv_text}，PNG={detector_result.get('image_path')}"
+                f"MAT={mat_text}，PNG={detector_result.get('image_path')}"
             )
         else:
             self.update_operation_progress({"stage": "Zemax 操作完成", "status": operation or "完成"})
@@ -3752,7 +3906,7 @@ class MainWindow(QMainWindow):
 
         summary = result.get("summary") if isinstance(result.get("summary"), dict) else {}
         sampled = bool(summary.get("sampled"))
-        csv_path = str(result.get("csv_path") or "").strip()
+        mat_path = str(result.get("mat_path") or "").strip()
         timings = result.get("timings") if isinstance(result.get("timings"), dict) else {}
         lines.extend(
             [
@@ -3766,14 +3920,14 @@ class MainWindow(QMainWindow):
                 f"  最小/最大: {self._format_float(summary.get('min_value'))} / {self._format_float(summary.get('max_value'))}",
                 f"  非零像素: {summary.get('nonzero_pixels')}",
                 f"  质心像素 X/Y: {self._format_float(summary.get('centroid_x_pixel'))} / {self._format_float(summary.get('centroid_y_pixel'))}",
-                f"  用时: 读取 {self._format_float(timings.get('read_seconds'))} s，写图/CSV {self._format_float(timings.get('write_seconds'))} s",
-                f"  CSV: {csv_path or '预览模式未导出；需要完整矩阵时点击“完整导出CSV”'}",
+                f"  用时: 读取 {self._format_float(timings.get('read_seconds'))} s，写图/MAT {self._format_float(timings.get('write_seconds'))} s",
+                f"  MATLAB(.mat): {mat_path or '仅查看未导出；需要保存全量矩阵时点击“完整导出MATLAB”'}",
                 f"  伪彩色图: {result.get('image_path')}",
             ]
         )
         return lines
 
-    def open_zemax_time_series_zzz(self) -> None:
+    def open_zemax_time_series_dts(self) -> None:
         start_dir = WORKSPACE
         if self.zemax_time_series_path is not None and self.zemax_time_series_path.parent.exists():
             start_dir = self.zemax_time_series_path.parent
@@ -3784,36 +3938,47 @@ class MainWindow(QMainWindow):
                 start_dir = candidate if candidate.exists() else zemax_project.parent
         file_path, _ = QFileDialog.getOpenFileName(
             self,
-            "打开 Zemax 时间序列 ZZZ",
+            "打开 Zemax 时间序列 DTS",
             str(start_dir),
-            "Zemax Time Series Data (*.zzz);;All Files (*)",
+            "Zemax Time Series Data (*.dts);;All Files (*)",
         )
         if not file_path:
             return
         try:
-            self.load_zemax_time_series_zzz_file(Path(file_path))
+            self.load_zemax_time_series_dts_file(Path(file_path))
         except Exception as exc:
-            QMessageBox.critical(self, "打开 ZZZ 失败", str(exc))
+            QMessageBox.critical(self, "打开 DTS 失败", str(exc))
 
-    def load_zemax_time_series_zzz_file(self, path: Path) -> None:
+    def load_zemax_time_series_dts_file(self, path: Path) -> None:
         path = Path(path)
         if not path.exists():
             raise FileNotFoundError(path)
         frames: list[dict[str, object]] = []
-        with zipfile.ZipFile(path, "r") as archive:
+        if self.zemax_time_series_archive is not None:
+            try:
+                self.zemax_time_series_archive.close()
+            except Exception:
+                pass
+            self.zemax_time_series_archive = None
+        self.zemax_time_series_pixmap_cache.clear()
+        self.zemax_time_series_pixmap_cache_order.clear()
+        archive = zipfile.ZipFile(path, "r")
+        try:
             manifest = json.loads(archive.read("manifest.json").decode("utf-8"))
             for frame_meta in manifest.get("frames") or []:
                 if not isinstance(frame_meta, dict):
                     continue
+                detector_png = str(frame_meta.get("detector_png") or "")
                 detector_csv = str(frame_meta.get("detector_csv") or "")
-                if not detector_csv:
+                if not detector_png and not detector_csv:
                     continue
-                with archive.open(detector_csv, "r") as stream:
-                    text = stream.read().decode("utf-8-sig", errors="replace")
-                grid = self._detector_grid_from_csv_text(text)
-                frames.append({"meta": frame_meta, "grid": grid})
+                frames.append({"meta": frame_meta})
+            self.zemax_time_series_archive = archive
+        except Exception:
+            archive.close()
+            raise
         if not frames:
-            raise ValueError("ZZZ 文件中没有可播放的 detector 帧。")
+            raise ValueError("DTS 文件中没有可播放的 detector 帧。")
         self.zemax_time_series_path = path
         self.zemax_time_series_manifest = manifest
         self.zemax_time_series_frames = frames
@@ -3821,7 +3986,18 @@ class MainWindow(QMainWindow):
         self.zemax_time_series_timer.stop()
         self.update_zemax_time_series_controls()
         self.display_zemax_time_series_frame(0)
-        self.append_log(f"已加载 Zemax 时间序列 ZZZ: {path}，帧数={len(frames)}")
+        if len(frames) > 1:
+            self.zemax_time_series_timer.start(100)
+            self.update_zemax_time_series_controls()
+        png_count = sum(
+            1
+            for frame in frames
+            if isinstance(frame.get("meta"), dict) and str(frame["meta"].get("detector_png") or "")
+        )
+        self.append_log(
+            f"已快速加载 Zemax 时间序列 DTS: {path}，帧数={len(frames)}，"
+            f"全分辨率PNG帧={png_count}。打开时只读 manifest，播放时按需读取当前帧。"
+        )
 
     def _detector_grid_from_csv_text(self, text: str) -> list[list[float]]:
         rows: list[list[float]] = []
@@ -3840,20 +4016,20 @@ class MainWindow(QMainWindow):
 
     def update_zemax_time_series_controls(self) -> None:
         frame_count = len(self.zemax_time_series_frames)
-        if hasattr(self, "zemax_zzz_frame_slider"):
-            self.zemax_zzz_frame_slider.blockSignals(True)
-            self.zemax_zzz_frame_slider.setRange(0, max(0, frame_count - 1))
-            self.zemax_zzz_frame_slider.setValue(min(self.zemax_time_series_current_index, max(0, frame_count - 1)))
-            self.zemax_zzz_frame_slider.setEnabled(frame_count > 0)
-            self.zemax_zzz_frame_slider.blockSignals(False)
-        if hasattr(self, "play_zemax_zzz_button"):
-            self.play_zemax_zzz_button.setEnabled(frame_count > 0)
-            self.play_zemax_zzz_button.setText("暂停" if self.zemax_time_series_timer.isActive() else "播放")
-        if hasattr(self, "zemax_zzz_frame_label"):
+        if hasattr(self, "zemax_dts_frame_slider"):
+            self.zemax_dts_frame_slider.blockSignals(True)
+            self.zemax_dts_frame_slider.setRange(0, max(0, frame_count - 1))
+            self.zemax_dts_frame_slider.setValue(min(self.zemax_time_series_current_index, max(0, frame_count - 1)))
+            self.zemax_dts_frame_slider.setEnabled(frame_count > 0)
+            self.zemax_dts_frame_slider.blockSignals(False)
+        if hasattr(self, "play_zemax_dts_button"):
+            self.play_zemax_dts_button.setEnabled(frame_count > 0)
+            self.play_zemax_dts_button.setText("暂停" if self.zemax_time_series_timer.isActive() else "播放")
+        if hasattr(self, "zemax_dts_frame_label"):
             if frame_count:
-                self.zemax_zzz_frame_label.setText(f"{self.zemax_time_series_current_index + 1}/{frame_count}")
+                self.zemax_dts_frame_label.setText(f"{self.zemax_time_series_current_index + 1}/{frame_count}")
             else:
-                self.zemax_zzz_frame_label.setText("0/0")
+                self.zemax_dts_frame_label.setText("0/0")
 
     def display_zemax_time_series_frame(self, index: int) -> None:
         if not self.zemax_time_series_frames:
@@ -3861,24 +4037,83 @@ class MainWindow(QMainWindow):
         index = max(0, min(int(index), len(self.zemax_time_series_frames) - 1))
         self.zemax_time_series_current_index = index
         frame = self.zemax_time_series_frames[index]
-        grid = frame.get("grid") if isinstance(frame, dict) else None
-        if not isinstance(grid, list):
+        pixmap = self.zemax_time_series_frame_pixmap(index, frame)
+        if pixmap.isNull():
             return
-        self.set_zemax_detector_preview_grid(grid)
+        self.set_zemax_detector_preview_pixmap(pixmap)
         meta = frame.get("meta") if isinstance(frame.get("meta"), dict) else {}
+        manifest = self.zemax_time_series_manifest
         time_label = str(meta.get("time_label") or meta.get("time_value") or index + 1)
+        summary = meta.get("summary") if isinstance(meta.get("summary"), dict) else {}
+        centroid_x = summary.get("centroid_x_pixel")
+        centroid_y = summary.get("centroid_y_pixel")
+        if centroid_x is not None and centroid_y is not None:
+            centroid_text = f"X={self._format_float(centroid_x)}，Y={self._format_float(centroid_y)} 像素"
+        else:
+            centroid_text = "无（该帧无能量或未记录质心）"
         lines = [
-            f"ZZZ: {self.zemax_time_series_path}",
+            f"DTS: {self.zemax_time_series_path}",
             f"当前帧: {index + 1}/{len(self.zemax_time_series_frames)}",
             f"时间: {time_label}",
-            f"Detector CSV: {meta.get('detector_csv')}",
+            f"当前质心: {centroid_text}",
+            f"Detector PNG: {meta.get('detector_png') or '无，已回退读取当前帧CSV'}",
+            f"MATLAB 原始数据 DTS: {manifest.get('matlab_raw_file') or manifest.get('playback_file') or ''}",
+            f"Detector CSV: {meta.get('detector_csv') or meta.get('raw_detector_csv')}",
+            "播放模式: 全分辨率PNG按需读取，不降采样",
         ]
-        manifest = self.zemax_time_series_manifest
         detector = manifest.get("detector") if isinstance(manifest.get("detector"), dict) else {}
         if detector:
             lines.insert(1, f"Detector: {self.zemax_detector_summary_line(detector)}")
         self.zemax_raytrace_result_log.setPlainText("\n".join(lines))
         self.update_zemax_time_series_controls()
+
+    def zemax_time_series_frame_pixmap(self, index: int, frame: dict[str, object]) -> QPixmap:
+        cached = self.zemax_time_series_pixmap_cache.get(index)
+        if cached is not None:
+            return cached
+        archive = self.zemax_time_series_archive
+        meta = frame.get("meta") if isinstance(frame.get("meta"), dict) else {}
+        if archive is None or not isinstance(meta, dict):
+            return QPixmap()
+        detector_png = str(meta.get("detector_png") or "")
+        if detector_png:
+            try:
+                data = archive.read(detector_png)
+                pixmap = QPixmap()
+                if pixmap.loadFromData(data, "PNG"):
+                    self.cache_zemax_time_series_pixmap(index, pixmap)
+                    return pixmap
+            except Exception as exc:
+                self.append_log(f"读取 DTS 全分辨率PNG失败，回退读取CSV: {detector_png}，{exc}")
+        detector_csv = str(meta.get("detector_csv") or meta.get("raw_detector_csv") or "")
+        if not detector_csv:
+            return QPixmap()
+        try:
+            raw_dts_file = Path(str(meta.get("raw_dts_file") or self.zemax_time_series_manifest.get("matlab_raw_file") or ""))
+            if str(meta.get("detector_csv") or ""):
+                text = archive.read(detector_csv).decode("utf-8-sig", errors="replace")
+            elif raw_dts_file.exists():
+                with zipfile.ZipFile(raw_dts_file, "r") as raw_archive:
+                    text = raw_archive.read(detector_csv).decode("utf-8-sig", errors="replace")
+            else:
+                return QPixmap()
+            grid = self._detector_grid_from_csv_text(text)
+            pixmap = self.zemax_detector_grid_pixmap(grid)
+            if not pixmap.isNull():
+                self.cache_zemax_time_series_pixmap(index, pixmap)
+            return pixmap
+        except Exception as exc:
+            self.append_log(f"读取 DTS 当前帧CSV失败: {detector_csv}，{exc}")
+            return QPixmap()
+
+    def cache_zemax_time_series_pixmap(self, index: int, pixmap: QPixmap) -> None:
+        self.zemax_time_series_pixmap_cache[index] = pixmap
+        if index in self.zemax_time_series_pixmap_cache_order:
+            self.zemax_time_series_pixmap_cache_order.remove(index)
+        self.zemax_time_series_pixmap_cache_order.append(index)
+        while len(self.zemax_time_series_pixmap_cache_order) > 64:
+            old_index = self.zemax_time_series_pixmap_cache_order.pop(0)
+            self.zemax_time_series_pixmap_cache.pop(old_index, None)
 
     @Slot(int)
     def zemax_time_series_slider_changed(self, value: int) -> None:
@@ -3891,7 +4126,7 @@ class MainWindow(QMainWindow):
         if self.zemax_time_series_timer.isActive():
             self.zemax_time_series_timer.stop()
         else:
-            self.zemax_time_series_timer.start(500)
+            self.zemax_time_series_timer.start(100)
         self.update_zemax_time_series_controls()
 
     @Slot()
@@ -3905,6 +4140,16 @@ class MainWindow(QMainWindow):
 
     def set_zemax_detector_preview_grid(self, grid: list[list[float]]) -> None:
         pixmap = self.zemax_detector_grid_pixmap(grid)
+        if pixmap.isNull():
+            self.set_zemax_detector_preview(None)
+            return
+        self.zemax_detector_preview_pixmap = pixmap
+        self.zemax_detector_preview_fit_to_window = True
+        self.zemax_detector_preview_zoom_factor = self.zemax_detector_fit_preview_factor()
+        self.set_zemax_detector_zoom_buttons_enabled(True)
+        self.update_zemax_detector_preview_pixmap()
+
+    def set_zemax_detector_preview_pixmap(self, pixmap: QPixmap) -> None:
         if pixmap.isNull():
             self.set_zemax_detector_preview(None)
             return
@@ -3979,9 +4224,7 @@ class MainWindow(QMainWindow):
 
     def set_zemax_detector_zoom_buttons_enabled(self, enabled: bool) -> None:
         for button_name in [
-            "zemax_detector_zoom_out_button",
             "zemax_detector_zoom_fit_button",
-            "zemax_detector_zoom_in_button",
         ]:
             button = getattr(self, button_name, None)
             if button is not None:
@@ -4032,14 +4275,7 @@ class MainWindow(QMainWindow):
         if zoom_label is not None:
             zoom_label.setText(self.zemax_detector_zoom_text())
 
-    @Slot()
-    def zoom_in_zemax_detector_preview(self) -> None:
-        self.zoom_zemax_detector_preview(1.25)
-
-    @Slot()
-    def zoom_out_zemax_detector_preview(self) -> None:
-        self.zoom_zemax_detector_preview(0.8)
-
+    @Slot(float)
     def zoom_zemax_detector_preview(self, factor: float) -> None:
         if self.zemax_detector_preview_pixmap is None:
             return
@@ -4085,6 +4321,17 @@ class MainWindow(QMainWindow):
             self.modules_table.setRowCount(0)
             if show_errors:
                 QMessageBox.warning(self, "未选择文件", "请先选择 Mechanical database（.mechdb/.mechdat）。")
+            return
+
+        # 用户主动点「读取模块」、是 database 文件、且还没有持久后台会话时:
+        # 启动持久会话并由它读取模块,而不是用一次性临时会话读完就退
+        # （否则随后读取/求解/导出会因无会话被拦)。启动时的静默加载不触发,避免开机即拉起 Mechanical。
+        if (
+            show_errors
+            and self.mechanical_port is None
+            and project.suffix.lower() in MECHANICAL_DATABASE_SUFFIXES
+        ):
+            self.open_mechanical(auto_load_modules=True)
             return
 
         self.module_load_show_errors = show_errors
@@ -4255,16 +4502,14 @@ class MainWindow(QMainWindow):
             "refresh_zemax_button",
             "import_pose_button",
             "steady_raytrace_button",
-            "zemax_time_series_detector_combo",
-            "load_zemax_time_series_detectors_button",
+            "transient_import_button",
             "transient_time_series_button",
-            "transient_raytrace_button",
+            "random_import_pose_button",
             "random_vibration_trace_button",
-            "random_raytrace_button",
             "random_vibration_count_spin",
             "open_zemax_raytrace_tab_button",
             "load_zemax_detectors_button",
-            "open_zemax_zzz_button",
+            "open_zemax_dts_button",
             "read_selected_detector_button",
             "export_selected_detector_button",
             "check_button",
@@ -4275,16 +4520,21 @@ class MainWindow(QMainWindow):
     def start_operation_status(self, stage: str, status: str) -> None:
         self.operation_started_at = time.monotonic()
         self.operation_timer.start(1000)
+        self._set_operation_state("running")
         self.update_operation_progress({"stage": stage, "status": status})
         self.update_operation_timer()
 
     @Slot(object)
     def update_operation_progress(self, payload: object) -> None:
+        progress_log: object = None
+        progress_logs: object = None
         if isinstance(payload, dict):
             stage = str(payload.get("stage") or self.operation_stage)
             status = str(payload.get("status") or "")
             analysis_state = str(payload.get("analysis_state") or "")
             solution_state = str(payload.get("solution_state") or "")
+            progress_log = payload.get("log")
+            progress_logs = payload.get("logs")
         else:
             stage = str(payload)
             status = ""
@@ -4296,6 +4546,17 @@ class MainWindow(QMainWindow):
         self.operation_status = " | ".join(detail_parts) if detail_parts else "运行中"
         self.operation_stage_label.setText(self.operation_stage)
         self.operation_status_label.setText(self.operation_status)
+        if any(key in stage for key in ("失败", "错误", "failed", "Failed", "Error")):
+            self._set_operation_state("error")
+        if progress_log:
+            self.append_log(str(progress_log))
+        if progress_logs:
+            if isinstance(progress_logs, (list, tuple)):
+                for item in progress_logs:
+                    if item:
+                        self.append_log(str(item))
+            else:
+                self.append_log(str(progress_logs))
 
     def update_operation_timer(self) -> None:
         if self.operation_started_at is None:
@@ -4500,6 +4761,8 @@ class MainWindow(QMainWindow):
     @Slot()
     def operation_thread_finished(self) -> None:
         self.stop_operation_timer()
+        if self.operation_state != "error":
+            self._set_operation_state("done")
         if self.pending_settings_dialog is not None:
             self.pending_settings_dialog.set_busy(False)
         if self.pending_results_dialog is not None:
@@ -4512,6 +4775,18 @@ class MainWindow(QMainWindow):
         if self.load_modules_after_mechanical_launch:
             self.load_modules_after_mechanical_launch = False
             QTimer.singleShot(0, lambda: self.load_analysis_modules(show_errors=True))
+        if getattr(self, "_random_trace_pending", False):
+            self._random_trace_pending = False
+            if self.zemax_detectors:
+                QTimer.singleShot(0, self._continue_random_vibration_trace)
+            else:
+                self.append_log("随机振动追迹: 探测器读取未成功，已取消。")
+        if getattr(self, "_time_series_pending", False):
+            self._time_series_pending = False
+            if self.zemax_detectors:
+                QTimer.singleShot(0, self._continue_time_series_trace)
+            else:
+                self.append_log("瞬态时间序列追迹: 探测器读取未成功，已取消。")
 
     @Slot()
     def clear_settings_dialog(self) -> None:
@@ -4520,6 +4795,27 @@ class MainWindow(QMainWindow):
     @Slot()
     def clear_results_dialog(self) -> None:
         self.results_dialog = None
+
+    def log_startup_path_detection(self) -> None:
+        detected = app_config.STARTUP_DETECTED_PATHS
+        if not detected:
+            return
+        labels = {
+            "ansys_root": "ANSYS 根目录",
+            "runwb2": "RunWB2",
+            "mechanical_exe": "Mechanical",
+            "opticstudio_exe": "Zemax OpticStudio",
+        }
+        lines = [f"{labels.get(key, key)}={value}" for key, value in detected.items()]
+        self.append_log("首次启动/路径自动检测完成，已写入本机配置:\n" + "\n".join(lines))
+
+    def open_path_settings_dialog(self) -> None:
+        dialog = PathSettingsDialog(self)
+        if dialog.exec() != QDialog.Accepted:
+            return
+        self.refresh_status()
+        self.update_zemax_status()
+        self.append_log(f"路径设置已保存: {app_config.SETTINGS_FILE}")
 
     def refresh_status(self) -> None:
         rows = self.collect_status()
@@ -4562,9 +4858,9 @@ class MainWindow(QMainWindow):
         process_ids = sorted(process_ids_by_name(ZEMAX_PROCESS_NAMES))
         process_text = "未运行" if not process_ids else ", ".join(str(pid) for pid in process_ids)
 
-        exe_status = str(OPTICSTUDIO_EXE)
-        if not OPTICSTUDIO_EXE.exists():
-            exe_status = f"{OPTICSTUDIO_EXE}（缺失）"
+        exe_status = str(app_config.OPTICSTUDIO_EXE)
+        if not app_config.OPTICSTUDIO_EXE.exists():
+            exe_status = f"{app_config.OPTICSTUDIO_EXE}（缺失）"
 
         project_text = "未运行"
         selected_project = self.current_zemax_project_path()
@@ -4618,9 +4914,9 @@ class MainWindow(QMainWindow):
         checks = [
             ("工程/database", project_value, project_ok),
             ("Zemax 工程", zemax_project_value, zemax_project_ok),
-            ("RunWB2", RUNWB2, RUNWB2.exists()),
-            ("Mechanical", MECHANICAL_EXE, MECHANICAL_EXE.exists()),
-            ("Zemax OpticStudio", OPTICSTUDIO_EXE, OPTICSTUDIO_EXE.exists()),
+            ("RunWB2", app_config.RUNWB2, app_config.RUNWB2.exists()),
+            ("Mechanical", app_config.MECHANICAL_EXE, app_config.MECHANICAL_EXE.exists()),
+            ("Zemax OpticStudio", app_config.OPTICSTUDIO_EXE, app_config.OPTICSTUDIO_EXE.exists()),
             ("PyMechanical", "ansys.mechanical.core", package_available("ansys.mechanical.core")),
             ("pythonnet", "clr", package_available("clr")),
             ("PySide6", "PySide6", package_available("PySide6")),
@@ -4768,15 +5064,17 @@ class MainWindow(QMainWindow):
             f"Zemax 长度单位={zemax_length_unit or '未知'}，"
             f"保存={'成功' if saved else '未保存，关闭 Zemax 时再选择是否保存'}"
         )
+        matched_items = [item for item in list(result.get("matched") or []) if isinstance(item, dict)]
+        self.append_zemax_import_objects_log("Zemax 导入镜片对象", matched_items)
         if baseline_file:
             created_text = "新建" if baseline_created else "沿用"
             self.append_log(f"Zemax 原始基准: {created_text} {baseline_file}，来源={baseline_source or '当前工程'}")
         if baseline_write_error:
             self.append_log(f"Zemax 原始基准保存失败: {baseline_write_error}")
-        for item in list(result.get("matched") or [])[:5]:
+        for item in matched_items[:5]:
             if not isinstance(item, dict):
                 continue
-            name = str(item.get("comment") or item.get("name") or "")
+            object_label = self.zemax_import_object_label(item)
             old_values = item.get("old_values") or []
             baseline_values = item.get("baseline_values") or old_values
             raw_delta = item.get("raw_delta_values") or []
@@ -4791,7 +5089,7 @@ class MainWindow(QMainWindow):
                 and len(new_values) >= 6
             ):
                 self.append_log(
-                    f"Zemax 导入明细 {name}: "
+                    f"Zemax 导入明细 {object_label}: "
                     f"位移换算 {item.get('mechanical_displacement_unit')} -> {item.get('zemax_length_unit')} "
                     f"(x{float(length_scale or 1):.6g}); "
                     f"原始位移=({float(raw_delta[0]):.6g}, {float(raw_delta[1]):.6g}, {float(raw_delta[2]):.6g})，"
@@ -5024,22 +5322,73 @@ class MainWindow(QMainWindow):
 
     def report_error(self, title: str, exc: Exception) -> None:
         message = f"{title}: {exc}"
-        self.append_log(message)
+        # 界面只显示简短消息;完整堆栈写入日志文件,便于排查深层 ANSYS/ZOS-API 报错。
+        self._logger.error(message, exc_info=exc)
+        timestamp = datetime.now().strftime("%H:%M:%S")
+        self.log.appendPlainText(f"[{timestamp}] {message}")
         QMessageBox.critical(self, title, str(exc))
 
     def append_log(self, text: str) -> None:
+        # 单一收口点:界面控件 + 日志文件同步产生。
+        self._logger.info(text)
         timestamp = datetime.now().strftime("%H:%M:%S")
         self.log.appendPlainText(f"[{timestamp}] {text}")
 
 
+def _apply_light_palette(app: QApplication) -> None:
+    """浅色 Fusion 调色板(青蓝 Teal 强调),覆盖 QSS 管不到的原生绘制。"""
+    palette = QPalette()
+    palette.setColor(QPalette.Window, QColor("#eef2f5"))
+    palette.setColor(QPalette.WindowText, QColor("#1b2530"))
+    palette.setColor(QPalette.Base, QColor("#ffffff"))
+    palette.setColor(QPalette.AlternateBase, QColor("#f6f8fa"))
+    palette.setColor(QPalette.Text, QColor("#1b2530"))
+    palette.setColor(QPalette.Button, QColor("#ffffff"))
+    palette.setColor(QPalette.ButtonText, QColor("#26323f"))
+    palette.setColor(QPalette.BrightText, QColor("#c7342e"))
+    palette.setColor(QPalette.Highlight, QColor("#14a08a"))
+    palette.setColor(QPalette.HighlightedText, QColor("#ffffff"))
+    palette.setColor(QPalette.ToolTipBase, QColor("#ffffff"))
+    palette.setColor(QPalette.ToolTipText, QColor("#1b2530"))
+    palette.setColor(QPalette.PlaceholderText, QColor("#8a97a6"))
+    palette.setColor(QPalette.Link, QColor("#0d8a76"))
+    palette.setColor(QPalette.Disabled, QPalette.Text, QColor("#aab4bf"))
+    palette.setColor(QPalette.Disabled, QPalette.ButtonText, QColor("#aab4bf"))
+    palette.setColor(QPalette.Disabled, QPalette.WindowText, QColor("#aab4bf"))
+    app.setPalette(palette)
+
+
+def _apply_app_font(app: QApplication, logger) -> None:
+    """显式设置中文字体,保证在不同电脑上字形一致(优先 微软雅黑 UI)。"""
+    families = set(QFontDatabase.families())
+    for name in ("Microsoft YaHei UI", "Microsoft YaHei", "微软雅黑", "Segoe UI"):
+        if name in families:
+            app.setFont(QFont(name, 9))
+            logger.info("界面字体: %s", name)
+            return
+    logger.info("界面字体: 使用系统默认(未找到首选中文字体)")
+
+
 def main() -> int:
+    logger = logging_setup.setup_logging()
+    logging_setup.install_qt_message_handler()
+    logger.info("启动 %s %s", APP_NAME, APP_VERSION)
     QApplication.setHighDpiScaleFactorRoundingPolicy(Qt.HighDpiScaleFactorRoundingPolicy.PassThrough)
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
-    window = MainWindow()
-    window.show()
-    return app.exec()
+    _apply_light_palette(app)
+    _apply_app_font(app, logger)
+    try:
+        window = MainWindow()
+        window.show()
+        exit_code = app.exec()
+    except Exception:
+        logger.critical("主窗口运行期间发生未处理异常", exc_info=True)
+        raise
+    logger.info("%s 正常退出,退出码=%s", APP_NAME, exit_code)
+    return exit_code
 
 
 if __name__ == "__main__":
     raise SystemExit(main())
+

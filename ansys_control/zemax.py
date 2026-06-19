@@ -14,7 +14,13 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
 
-from .config import OPTICSTUDIO_EXE, require_file
+from . import config as app_config
+from .config import require_file
+
+try:  # numpy 用于 SVD/Kabsch 严格刚体配准;不可用时回退纯 Python 小角度解
+    import numpy as _np
+except Exception:  # pragma: no cover - 仅在缺少 numpy 的环境触发
+    _np = None
 
 
 _ZOSAPI_SESSIONS: list[dict[str, object]] = []
@@ -32,6 +38,14 @@ def open_opticstudio(project_file: Path | None = None) -> dict[str, object]:
 
 @dataclass
 class LensPoseRecord:
+    """单个光学元件的刚体运动:质心平移(偏心 decenter / 离焦 despace)+ 绕质心旋转(倾斜 tilt)。
+
+    x/y/z 为质心平移,单位 m;其中横向分量即光学偏心(decenter),沿光轴分量即离焦/despace。
+    rx/ry/rz 为绕质心的倾斜(tilt),以旋转向量分量表示,单位 deg。
+    rms_residual 为去除最佳刚体平移+旋转后各节点的剩余 RMS(单位 m),
+    表征该元件的非刚体面形误差;为 None 表示未计算(缺少节点坐标或 numpy 不可用)。
+    """
+
     name: str
     x: float = 0.0
     y: float = 0.0
@@ -42,6 +56,7 @@ class LensPoseRecord:
     source: str = ""
     displacement_unit: str = "m"
     rotation_unit: str = "deg"
+    rms_residual: float | None = None
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -55,6 +70,7 @@ class LensPoseRecord:
             "source": self.source,
             "displacement_unit": self.displacement_unit,
             "rotation_unit": self.rotation_unit,
+            "rms_residual": self.rms_residual,
         }
 
 
@@ -152,7 +168,7 @@ def calculate_pose_records_from_mechanical_exports(
         component = _component_from_table(table, section, path)
         lens_name = _lens_name_from_result(result_name, section, component)
         if not component:
-            logs.append(f"跳过 {path.name}: 不是 UX/UY/UZ 方向位移结果，不能用于位姿计算。")
+            logs.append(f"跳过 {path.name}: 不是 UX/UY/UZ 方向位移结果，不能用于位移/旋转计算。")
             continue
         payload = {
             "path": path,
@@ -184,7 +200,7 @@ def calculate_pose_records_from_mechanical_exports(
         logs.append(f"跳过无法识别的 TXT 文件 {len(skipped_files)} 个。")
     if not all_records:
         logs.append(
-            "没有算出可导入 Zemax 的镜片位姿。当前导出文件通常只有总形变或单方向 Directional Deformation。"
+            "没有算出可导入 Zemax 的镜片位移/旋转。当前导出文件通常只有总形变或单方向 Directional Deformation。"
         )
 
     saved_paths: dict[str, str] = {}
@@ -192,7 +208,7 @@ def calculate_pose_records_from_mechanical_exports(
         output_dir = Path(save_dir) if save_dir is not None else folder / "zemax_pose_calculation"
         output_dir.mkdir(parents=True, exist_ok=True)
         saved_paths = _save_pose_calculation(output_dir, all_records, logs, folder)
-        logs.append("位姿计算结果已保存: " + ", ".join(saved_paths.values()))
+        logs.append("位移/旋转计算结果已保存: " + ", ".join(saved_paths.values()))
 
     return {
         "latest_records": latest_records,
@@ -328,7 +344,7 @@ def import_lens_poses_to_current_opticstudio(
     if not records:
         raise ValueError(
             "Mechanical 导出文件夹中没有读取到镜片位移/旋转数据。"
-            "需要先读取位姿，并确保导出中包含每个镜片的 UX/UY/UZ 和节点坐标。"
+            "需要先读取位移/旋转，并确保导出中包含每个镜片的 UX/UY/UZ 和节点坐标。"
         )
 
     expected_project = require_file(project_file, "Zemax project file") if project_file is not None else None
@@ -594,7 +610,7 @@ def calculate_pose_time_series_from_mechanical_exports(
         component = _component_from_table(table, section, path)
         lens_name = _lens_name_from_result(result_name, section, component)
         if not component:
-            logs.append(f"跳过 {path.name}: 不是 UX/UY/UZ 方向位移结果，不能用于位姿计算。")
+            logs.append(f"跳过 {path.name}: 不是 UX/UY/UZ 方向位移结果，不能用于位移/旋转计算。")
             continue
         frame_info = _time_frame_info_from_export_file(path)
         frame_key = tuple(frame_info["key"])
@@ -666,14 +682,14 @@ def calculate_pose_time_series_from_mechanical_exports(
     if skipped_files:
         logs.append(f"跳过无法识别的 TXT 文件 {len(skipped_files)} 个。")
     if not frames:
-        logs.append("没有算出可用于 Zemax 时间序列追迹的镜片位姿帧。")
+        logs.append("没有算出可用于 Zemax 时间序列追迹的镜片位移/旋转帧。")
 
     saved_paths: dict[str, str] = {}
     if save:
         output_dir = Path(save_dir) if save_dir is not None else folder / "zemax_pose_calculation"
         output_dir.mkdir(parents=True, exist_ok=True)
         saved_paths = _save_pose_time_series_calculation(output_dir, frames, all_frame_records, logs, folder)
-        logs.append("时间序列位姿计算结果已保存: " + ", ".join(saved_paths.values()))
+        logs.append("时间序列位移/旋转计算结果已保存: " + ", ".join(saved_paths.values()))
 
     return {
         "frames": frames,
@@ -683,6 +699,93 @@ def calculate_pose_time_series_from_mechanical_exports(
         "saved_paths": saved_paths,
         "source_folder": str(folder),
     }
+
+
+def _format_float_for_log(value: object) -> str:
+    try:
+        return f"{float(value):.6g}"
+    except (TypeError, ValueError):
+        return str(value)
+
+
+def _matlab_raw_dts_path(playback_file: Path) -> Path:
+    playback_file = Path(playback_file)
+    suffix = playback_file.suffix or ".dts"
+    stem = playback_file.stem
+    if stem.lower().endswith("_playback"):
+        stem = stem[:-9]
+    return playback_file.with_name(f"{stem}_matlab_raw{suffix}")
+
+
+def _format_pose_record_for_log(record: LensPoseRecord) -> str:
+    residual_text = (
+        f"; 面形残差RMS={record.rms_residual:.3g} {record.displacement_unit}"
+        if record.rms_residual is not None
+        else ""
+    )
+    return (
+        f"{record.name}: "
+        f"平移(偏心/离焦) X={record.x:.6g}, Y={record.y:.6g}, Z={record.z:.6g} {record.displacement_unit}; "
+        f"倾斜 Rx={record.rx:.6g}, Ry={record.ry:.6g}, Rz={record.rz:.6g} {record.rotation_unit}"
+        f"{residual_text}"
+    )
+
+
+def _time_series_pose_calculation_log(series: dict[str, object], frames: list[LensPoseFrame]) -> str:
+    lines = [
+        "Zemax 时间序列位移/旋转计算完成，先列出全部时间帧的镜片位移/旋转；下面这些值已全部算完，然后才会开始逐帧导入和追迹。",
+        f"Mechanical 导出文件夹: {series.get('source_folder') or ''}",
+        f"时间帧数: {len(frames)}",
+    ]
+    saved_paths = series.get("saved_paths") if isinstance(series.get("saved_paths"), dict) else {}
+    if saved_paths:
+        lines.append("位移/旋转计算文件:")
+        for key, value in saved_paths.items():
+            lines.append(f"  {key}: {value}")
+    for frame in frames:
+        lines.append(f"时间帧 {frame.frame_index}/{len(frames)}，时刻={frame.time_label}:")
+        for record in frame.records:
+            lines.append("  " + _format_pose_record_for_log(record))
+    extra_logs = [str(item) for item in list(series.get("logs") or []) if str(item).strip()]
+    if extra_logs:
+        lines.append("计算诊断:")
+        lines.extend("  " + item for item in extra_logs)
+    return "\n".join(lines)
+
+
+def _time_series_frame_trace_log(
+    frame: LensPoseFrame,
+    frame_count: int,
+    matched: list[dict[str, object]],
+    detector_number: int,
+    zemax_length_unit: str,
+) -> str:
+    lines = [
+        f"Zemax 时间序列追迹: 当前导入时间帧 {frame.frame_index}/{frame_count}，时刻={frame.time_label}，"
+        f"已写入以下镜片位移/旋转，随后清空 Detector 并追迹 Detector {detector_number}。"
+    ]
+    for item in matched:
+        try:
+            object_index = int(item.get("object_index") or 0)
+        except (TypeError, ValueError):
+            object_index = 0
+        comment = str(item.get("comment") or "").strip()
+        source_name = str(item.get("name") or "").strip()
+        display_name = comment or source_name or "(无 Comment)"
+        if source_name and comment and source_name != comment:
+            display_name = f"{display_name}（Mechanical={source_name}）"
+        converted = list(item.get("converted_delta_values") or [])
+        if len(converted) >= 6:
+            lines.append(
+                f"  {object_index:03d} {display_name}: "
+                f"导入位移=({_format_float_for_log(converted[0])}, {_format_float_for_log(converted[1])}, "
+                f"{_format_float_for_log(converted[2])}) {zemax_length_unit}; "
+                f"导入旋转=({_format_float_for_log(converted[3])}, {_format_float_for_log(converted[4])}, "
+                f"{_format_float_for_log(converted[5])}) deg"
+            )
+        else:
+            lines.append(f"  {object_index:03d} {display_name}")
+    return "\n".join(lines)
 
 
 def list_zemax_detectors(project_file: Path) -> dict[str, object]:
@@ -745,9 +848,9 @@ def run_zemax_ray_trace_and_read_detector(
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     base_name = _detector_result_base_name(project_file, detector, detector_number)
-    csv_path = output_dir / f"{base_name}.csv"
+    mat_path = output_dir / f"{base_name}.mat"
     png_path = output_dir / f"{base_name}.png"
-    _write_detector_grid_csv(csv_path, detector_result["grid"])
+    _write_detector_grid_mat(mat_path, detector_result, detector)
     _write_false_color_png(
         png_path,
         detector_result["grid"],
@@ -766,7 +869,7 @@ def run_zemax_ray_trace_and_read_detector(
         },
         "cpu_cores": cpu_core_info,
         "summary": {key: value for key, value in detector_result.items() if key != "grid"},
-        "csv_path": str(csv_path),
+        "mat_path": str(mat_path),
         "image_path": str(png_path),
         "log_scale": bool(log_scale),
     }
@@ -828,14 +931,13 @@ def read_zemax_detector_result(
     *,
     output_dir: Path | None = None,
     log_scale: bool = True,
-    write_csv: bool = False,
-    preview_max_dimension: int | None = DETECTOR_PREVIEW_MAX_DIMENSION,
+    export_matlab: bool = False,
 ) -> dict[str, object]:
     """Read/export one selected detector from the current background OpticStudio project.
 
-    The default path is a fast UI preview: it reads a sampled detector grid and
-    skips the full CSV export. Full detector data remains available by passing
-    write_csv=True, which intentionally takes longer.
+    两条路径都读取全分辨率探测器矩阵:
+    - ``export_matlab=False``(快速查看):只读全分辨率网格并生成伪彩色 PNG 预览,不落盘数据文件;
+    - ``export_matlab=True``(完整导出):额外把全分辨率矩阵写成 MATLAB ``.mat`` 文件。
     """
     project_file = require_file(Path(project_file), "Zemax project file")
     detector_number = int(detector_number)
@@ -864,8 +966,7 @@ def read_zemax_detector_result(
         detector,
         output_dir,
         log_scale=log_scale,
-        write_csv=write_csv,
-        preview_max_dimension=preview_max_dimension,
+        export_matlab=export_matlab,
     )
     timings = result.setdefault("timings", {})
     if isinstance(timings, dict):
@@ -891,23 +992,30 @@ def run_zemax_time_series_ray_trace(
     cpu_core_count: int | None = None,
     progress_callback: Callable[[dict[str, object]], None] | None = None,
 ) -> dict[str, object]:
-    """Apply transient Mechanical pose frames, trace each frame, and save raw detector data to .zzz."""
+    """Apply transient Mechanical pose frames, trace each frame, and save raw detector data to .dts."""
     export_folder = require_file(Path(export_folder), "Mechanical export folder")
     if not export_folder.is_dir():
         raise NotADirectoryError(f"Mechanical export path is not a folder: {export_folder}")
     project_file = require_file(Path(project_file), "Zemax project file")
 
     if progress_callback is not None:
-        progress_callback({"stage": "Zemax 时间序列追迹", "status": "正在解析 Mechanical 时间序列位姿"})
+        progress_callback({"stage": "Zemax 时间序列追迹", "status": "正在解析 Mechanical 时间序列位移/旋转"})
     series = calculate_pose_time_series_from_mechanical_exports(export_folder, save=True)
     frames = [frame for frame in series.get("frames") or [] if isinstance(frame, LensPoseFrame)]
     if not frames:
         raise ValueError(
-            "所选 Mechanical 导出文件夹没有可用于时间序列追迹的位姿帧。"
+            "所选 Mechanical 导出文件夹没有可用于时间序列追迹的位移/旋转帧。"
             "需要导出瞬态结果集，并包含镜片 UX/UY/UZ 或 UVECTORS 节点数据。"
         )
 
     if progress_callback is not None:
+        progress_callback(
+            {
+                "stage": "Zemax 时间序列位移/旋转计算完成",
+                "status": f"已先计算 {len(frames)} 个时间帧的全部镜片位移/旋转，随后才开始追迹",
+                "log": _time_series_pose_calculation_log(series, frames),
+            }
+        )
         progress_callback({"stage": "Zemax 时间序列追迹", "status": f"正在打开 Zemax 工程，时间帧 {len(frames)} 个"})
     application, system = _connect_or_open_selected_opticstudio_system(project_file)
     nce = getattr(system, "NCE", None)
@@ -929,12 +1037,17 @@ def run_zemax_time_series_ray_trace(
     if output_file is None:
         output_dir = project_file.parent / "zemax_time_series_results"
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        output_file = output_dir / f"{project_file.stem}_transient_detector_{detector_number:03d}_{timestamp}.zzz"
+        output_file = output_dir / f"{project_file.stem}_transient_detector_{detector_number:03d}_{timestamp}.dts"
     output_file = Path(output_file)
     output_file.parent.mkdir(parents=True, exist_ok=True)
+    raw_output_file = _matlab_raw_dts_path(output_file)
+    raw_output_file.parent.mkdir(parents=True, exist_ok=True)
     temp_output_file = output_file.with_name(f"{output_file.name}.tmp")
+    temp_raw_output_file = raw_output_file.with_name(f"{raw_output_file.name}.tmp")
     if temp_output_file.exists():
         temp_output_file.unlink()
+    if temp_raw_output_file.exists():
+        temp_raw_output_file.unlink()
 
     zemax_length_unit = _current_zemax_length_unit(system)
     if progress_callback is not None:
@@ -949,13 +1062,17 @@ def run_zemax_time_series_ray_trace(
     started = time.monotonic()
 
     try:
-        with zipfile.ZipFile(temp_output_file, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        with zipfile.ZipFile(temp_output_file, "w", compression=zipfile.ZIP_DEFLATED) as playback_archive, zipfile.ZipFile(
+            temp_raw_output_file,
+            "w",
+            compression=zipfile.ZIP_DEFLATED,
+        ) as raw_archive:
             for frame in frames:
                 if progress_callback is not None:
                     progress_callback(
                         {
                             "stage": "Zemax 时间序列追迹",
-                            "status": f"帧 {frame.frame_index}/{len(frames)}，时间 {frame.time_label}: 写入镜片位姿",
+                            "status": f"帧 {frame.frame_index}/{len(frames)}，时间 {frame.time_label}: 写入镜片位移/旋转",
                         }
                     )
                 matched, unmatched = _apply_pose_records_to_nce(
@@ -979,6 +1096,19 @@ def run_zemax_time_series_ray_trace(
                     progress_callback(
                         {
                             "stage": "Zemax 时间序列追迹",
+                            "status": f"帧 {frame.frame_index}/{len(frames)}，时间 {frame.time_label}: 已导入镜片位移/旋转，准备追迹",
+                            "log": _time_series_frame_trace_log(
+                                frame,
+                                len(frames),
+                                matched,
+                                detector_number,
+                                zemax_length_unit,
+                            ),
+                        }
+                    )
+                    progress_callback(
+                        {
+                            "stage": "Zemax 时间序列追迹",
                             "status": f"帧 {frame.frame_index}/{len(frames)}，时间 {frame.time_label}: 清空 Detector 并追迹",
                         }
                     )
@@ -994,26 +1124,38 @@ def run_zemax_time_series_ray_trace(
                 detector_result = _read_detector_result_grid(nce, detector_number, max_dimension=None)
                 frame_dir = f"frames/{frame.frame_index:04d}"
                 detector_csv_path = f"{frame_dir}/detector.csv"
+                detector_png_path = f"{frame_dir}/detector.png"
                 pose_json_path = f"{frame_dir}/pose.json"
                 if progress_callback is not None:
                     progress_callback(
                         {
                             "stage": "Zemax 时间序列追迹",
-                            "status": f"帧 {frame.frame_index}/{len(frames)}，时间 {frame.time_label}: 写入 ZZZ 数据",
+                            "status": f"帧 {frame.frame_index}/{len(frames)}，时间 {frame.time_label}: 分别写入快速播放PNG和MATLAB原始CSV",
                         }
                     )
-                archive.writestr(detector_csv_path, _grid_to_csv_text(detector_result["grid"]))
-                archive.writestr(
-                    pose_json_path,
-                    json.dumps(
-                        {
-                            "frame": frame.as_dict(),
-                            "matched": matched,
-                            "unmatched": unmatched,
-                        },
-                        ensure_ascii=False,
-                        indent=2,
+                raw_archive.writestr(detector_csv_path, _grid_to_csv_text(detector_result["grid"]))
+                playback_archive.writestr(
+                    detector_png_path,
+                    _false_color_png_bytes(
+                        detector_result["grid"],
+                        float(detector_result.get("min_value") or 0.0),
+                        float(detector_result.get("max_value") or 0.0),
+                        log_scale=True,
                     ),
+                )
+                pose_json_text = json.dumps(
+                    {
+                        "frame": frame.as_dict(),
+                        "matched": matched,
+                        "unmatched": unmatched,
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                )
+                playback_archive.writestr(pose_json_path, pose_json_text)
+                raw_archive.writestr(
+                    pose_json_path,
+                    pose_json_text,
                 )
                 summary = {key: value for key, value in detector_result.items() if key != "grid"}
                 frame_entries.append(
@@ -1022,17 +1164,23 @@ def run_zemax_time_series_ray_trace(
                         "time_value": frame.time_value,
                         "time_label": frame.time_label,
                         "set_index": frame.set_index,
-                        "detector_csv": detector_csv_path,
+                        "detector_png": detector_png_path,
+                        "detector_png_full_resolution": True,
+                        "raw_detector_csv": detector_csv_path,
+                        "raw_dts_file": str(raw_output_file),
                         "pose_json": pose_json_path,
                         "matched_count": len(matched),
                         "unmatched_count": len(unmatched),
+                        "imported_objects": _matched_import_object_summaries(matched),
                         "summary": summary,
                     }
                 )
 
             manifest = {
-                "schema": "ansys_zemax_transient_detector_zzz_v1",
+                "schema": "ansys_zemax_transient_detector_playback_dts_v1",
                 "created_at": datetime.now().isoformat(timespec="seconds"),
+                "file_role": "fast_playback_full_resolution_png",
+                "matlab_raw_file": str(raw_output_file),
                 "project_file": str(project_file),
                 "source_export_folder": str(export_folder),
                 "system_file": str(getattr(system, "SystemFile", "") or ""),
@@ -1047,17 +1195,41 @@ def run_zemax_time_series_ray_trace(
                     "logs": series.get("logs") or [],
                 },
                 "unmatched_by_frame": unmatched_by_frame,
-                "matlab": {
-                    "description": "This .zzz file is a ZIP container. In MATLAB: unzip('file.zzz','out'); manifest=jsondecode(fileread(fullfile('out','manifest.json'))); data=readmatrix(fullfile('out',manifest.frames(1).detector_csv));",
-                    "loader": "matlab/load_zzz_detector_series.m",
+                "playback": {
+                    "description": "Fast playback file. Frames contain full-resolution detector PNG images. MATLAB raw detector CSV data is saved in matlab_raw_file.",
+                    "full_resolution_png": True,
                 },
                 "elapsed_seconds": round(time.monotonic() - started, 3),
             }
-            archive.writestr("manifest.json", json.dumps(manifest, ensure_ascii=False, indent=2))
-            archive.writestr("matlab/load_zzz_detector_series.m", _matlab_zzz_loader_text())
+            raw_frame_entries = []
+            for frame_entry in frame_entries:
+                raw_entry = dict(frame_entry)
+                raw_entry.pop("detector_png", None)
+                raw_entry.pop("detector_png_full_resolution", None)
+                raw_entry.pop("raw_dts_file", None)
+                raw_entry["detector_csv"] = raw_entry.pop("raw_detector_csv", "")
+                raw_frame_entries.append(raw_entry)
+            raw_manifest = {
+                **manifest,
+                "schema": "ansys_zemax_transient_detector_matlab_raw_dts_v1",
+                "file_role": "matlab_raw_detector_csv",
+                "playback_file": str(output_file),
+                "frames": raw_frame_entries,
+                "matlab": {
+                    "description": "This .dts file is a ZIP container. In MATLAB: unzip('file.dts','out'); manifest=jsondecode(fileread(fullfile('out','manifest.json'))); data=readmatrix(fullfile('out',manifest.frames(1).detector_csv));",
+                    "loader": "matlab/load_dts_detector_series.m",
+                },
+            }
+            raw_manifest.pop("playback", None)
+            playback_archive.writestr("manifest.json", json.dumps(manifest, ensure_ascii=False, indent=2))
+            raw_archive.writestr("manifest.json", json.dumps(raw_manifest, ensure_ascii=False, indent=2))
+            raw_archive.writestr("matlab/load_dts_detector_series.m", _matlab_dts_loader_text())
         if output_file.exists():
             output_file.unlink()
+        if raw_output_file.exists():
+            raw_output_file.unlink()
         temp_output_file.replace(output_file)
+        temp_raw_output_file.replace(raw_output_file)
     finally:
         try:
             ray_trace.Close()
@@ -1072,6 +1244,11 @@ def run_zemax_time_series_ray_trace(
                 temp_output_file.unlink()
             except Exception:
                 pass
+        if temp_raw_output_file.exists():
+            try:
+                temp_raw_output_file.unlink()
+            except Exception:
+                pass
 
     _mark_zosapi_session_dirty(application, system, False)
     return {
@@ -1080,6 +1257,8 @@ def run_zemax_time_series_ray_trace(
         "project_file": str(project_file),
         "source_export_folder": str(export_folder),
         "output_file": str(output_file),
+        "playback_file": str(output_file),
+        "raw_output_file": str(raw_output_file),
         "detector": detector,
         "frame_count": len(frame_entries),
         "frames": frame_entries,
@@ -1089,6 +1268,34 @@ def run_zemax_time_series_ray_trace(
     }
 
 
+def _sample_multivariate_pose(sigma_list, correlation, sample_count: int, seed: int | None):
+    """从多元正态 N(0, Σ) 抽样位移/旋转向量,Σ = D·C·D。
+
+    sigma_list : 各自由度 1σ(长度 6N,顺序为每个镜片的 x,y,z,rx,ry,rz);
+    correlation: 相关矩阵 C(6N×6N);None 表示单位阵(各自由度独立,等价于逐项独立高斯);
+    返回 (sample_count, 6N) 数组;numpy 不可用时返回 None(由调用方回退)。
+    """
+    if _np is None:
+        return None
+    sigma = _np.asarray(sigma_list, dtype=float)
+    n = sigma.size
+    if correlation is None:
+        C = _np.eye(n)
+    else:
+        C = _np.asarray(correlation, dtype=float)
+        if C.shape != (n, n):
+            raise ValueError(f"相关矩阵维度应为 {n}x{n},实际为 {tuple(C.shape)};自由度顺序见计算日志。")
+        C = 0.5 * (C + C.T)  # 对称化
+    cov = (sigma[:, None] * sigma[None, :]) * C  # Σ = D C D
+    cov = 0.5 * (cov + cov.T)
+    # 投影到最近半正定矩阵(防止用户相关阵非 PSD 或数值误差)
+    eigvals, eigvecs = _np.linalg.eigh(cov)
+    eigvals = _np.clip(eigvals, 0.0, None)
+    cov = (eigvecs * eigvals) @ eigvecs.T
+    rng = _np.random.default_rng(seed)
+    return rng.multivariate_normal(_np.zeros(n), cov, size=int(sample_count))
+
+
 def calculate_random_vibration_pose_frames_from_mechanical_exports(
     folder: Path,
     sample_count: int,
@@ -1096,8 +1303,15 @@ def calculate_random_vibration_pose_frames_from_mechanical_exports(
     *,
     seed: int | None = None,
     save: bool = True,
+    correlation=None,
 ) -> dict[str, object]:
-    """Create random pose samples using calculated pose values as one-sigma standard deviations."""
+    """以 Mechanical 1σ 位移/旋转为标准差,按多元正态 N(0, Σ) 生成随机振动位移/旋转样本。
+
+    Σ = D·C·D:D 为各自由度 1σ 的对角阵,C 为相关矩阵。
+    - 默认 C = 单位阵 → 各镜片/各自由度独立(与逐项独立高斯等价);
+    - 若导出文件夹内有 ``pose_correlation.csv``(6N×6N 数值矩阵,DOF 顺序见日志)
+      或调用方传入 ``correlation``,则启用相关性(典型来自模态分析)。
+    """
     folder = require_file(Path(folder), "Mechanical export folder")
     if not folder.is_dir():
         raise NotADirectoryError(f"Mechanical export path is not a folder: {folder}")
@@ -1106,28 +1320,68 @@ def calculate_random_vibration_pose_frames_from_mechanical_exports(
     if not source_records:
         raise ValueError(
             "Mechanical 导出文件夹中没有读取到可作为随机振动标准差的镜片位移/旋转。"
-            "需要包含镜片 UX/UY/UZ 或可导入的位姿数据。"
+            "需要包含镜片 UX/UY/UZ 或可导入的位移/旋转数据。"
         )
 
-    rng = random.Random(seed)
+    dof_names = ["x", "y", "z", "rx", "ry", "rz"]
+    sigma_list: list[float] = []
+    for source in source_records:
+        sigma_list += [abs(float(getattr(source, d))) for d in dof_names]
+    dof_count = len(sigma_list)
+
+    # 相关矩阵:调用方传入 > 文件 pose_correlation.csv > 单位阵(独立)
+    correlation_source = "单位阵（各镜片/各自由度独立）"
+    corr_warnings: list[str] = []
+    if correlation is not None:
+        correlation_source = "调用方提供的相关矩阵"
+    elif _np is not None:
+        corr_path = folder / "pose_correlation.csv"
+        if corr_path.exists():
+            try:
+                loaded = _np.loadtxt(corr_path, delimiter=",")
+                if loaded.shape == (dof_count, dof_count):
+                    correlation = loaded
+                    correlation_source = f"相关矩阵文件 {corr_path.name}"
+                else:
+                    corr_warnings.append(
+                        f"发现 {corr_path.name} 但维度 {tuple(loaded.shape)} ≠ {dof_count}×{dof_count}，已忽略，按独立处理。"
+                    )
+            except Exception as exc:
+                corr_warnings.append(f"读取 {corr_path.name} 失败({exc})，已忽略，按独立处理。")
+
     logs = [
         f"随机振动样本数: {sample_count}",
         f"随机种子: {seed if seed is not None else '系统默认'}",
-        "每个镜片的当前计算位移/转角绝对值作为正态分布标准差，均值为 0。",
+        "采样分布: 多元正态 N(0, Σ)，Σ = D·C·D（D=各自由度1σ对角阵，C=相关矩阵），均值为 0。",
+        f"相关性来源: {correlation_source}",
+        "自由度顺序（构造相关矩阵用，行/列一一对应）: "
+        + ", ".join(f"{src.name}.{d}" for src in source_records for d in dof_names),
     ]
+    logs.extend(corr_warnings)
+
+    samples = _sample_multivariate_pose(sigma_list, correlation, sample_count, seed)
+    fallback_rng = random.Random(seed) if samples is None else None
+    if samples is None:
+        logs.append("注意: numpy 不可用，已回退为逐自由度独立高斯抽样（忽略相关矩阵）。")
+
     frames: list[LensPoseFrame] = []
     all_records: list[dict[str, object]] = []
     for frame_index in range(1, sample_count + 1):
         records: list[LensPoseRecord] = []
-        for source in source_records:
+        for lens_index, source in enumerate(source_records):
+            if samples is not None:
+                base = lens_index * 6
+                values = [float(samples[frame_index - 1][base + k]) for k in range(6)]
+            else:
+                values = [fallback_rng.gauss(0.0, abs(float(getattr(source, d)))) for d in dof_names]
             sampled = LensPoseRecord(
                 name=source.name,
-                x=rng.gauss(0.0, abs(float(source.x))),
-                y=rng.gauss(0.0, abs(float(source.y))),
-                z=rng.gauss(0.0, abs(float(source.z))),
-                rx=rng.gauss(0.0, abs(float(source.rx))),
-                ry=rng.gauss(0.0, abs(float(source.ry))),
-                rz=rng.gauss(0.0, abs(float(source.rz))),
+                x=values[0],
+                y=values[1],
+                z=values[2],
+                rx=values[3],
+                ry=values[4],
+                rz=values[5],
                 source=f"random sample {frame_index}; std source: {source.source}",
                 displacement_unit=source.displacement_unit,
                 rotation_unit=source.rotation_unit,
@@ -1173,7 +1427,7 @@ def calculate_random_vibration_pose_frames_from_mechanical_exports(
         output_dir = Path(save_dir) if save_dir is not None else folder / "zemax_pose_calculation"
         output_dir.mkdir(parents=True, exist_ok=True)
         saved_paths = _save_pose_time_series_calculation(output_dir, frames, all_records, logs, folder)
-        logs.append("随机振动位姿样本已保存: " + ", ".join(saved_paths.values()))
+        logs.append("随机振动位移/旋转样本已保存: " + ", ".join(saved_paths.values()))
     return {
         "frames": frames,
         "frame_count": len(frames),
@@ -1198,7 +1452,7 @@ def run_zemax_random_vibration_ray_trace(
     cpu_core_count: int | None = None,
     progress_callback: Callable[[dict[str, object]], None] | None = None,
 ) -> dict[str, object]:
-    """Generate random vibration pose samples, trace each sample, and save raw detector data to .zzz."""
+    """Generate random vibration pose samples, trace each sample, and save raw detector data to .dts."""
     export_folder = require_file(Path(export_folder), "Mechanical export folder")
     if not export_folder.is_dir():
         raise NotADirectoryError(f"Mechanical export path is not a folder: {export_folder}")
@@ -1206,7 +1460,7 @@ def run_zemax_random_vibration_ray_trace(
     sample_count = max(1, int(sample_count))
 
     if progress_callback is not None:
-        progress_callback({"stage": "Zemax 随机振动追迹", "status": f"正在生成 {sample_count} 个随机振动位姿样本"})
+        progress_callback({"stage": "Zemax 随机振动追迹", "status": f"正在生成 {sample_count} 个随机振动位移/旋转样本"})
     series = calculate_random_vibration_pose_frames_from_mechanical_exports(
         export_folder,
         sample_count,
@@ -1215,7 +1469,7 @@ def run_zemax_random_vibration_ray_trace(
     )
     frames = [frame for frame in series.get("frames") or [] if isinstance(frame, LensPoseFrame)]
     if not frames:
-        raise ValueError("没有生成可用于随机振动追迹的位姿样本。")
+        raise ValueError("没有生成可用于随机振动追迹的位移/旋转样本。")
 
     if progress_callback is not None:
         progress_callback({"stage": "Zemax 随机振动追迹", "status": f"正在打开 Zemax 工程，随机样本 {len(frames)} 个"})
@@ -1239,12 +1493,17 @@ def run_zemax_random_vibration_ray_trace(
     if output_file is None:
         output_dir = project_file.parent / "zemax_random_vibration_results"
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        output_file = output_dir / f"{project_file.stem}_random_detector_{detector_number:03d}_{timestamp}.zzz"
+        output_file = output_dir / f"{project_file.stem}_random_detector_{detector_number:03d}_{timestamp}.dts"
     output_file = Path(output_file)
     output_file.parent.mkdir(parents=True, exist_ok=True)
+    raw_output_file = _matlab_raw_dts_path(output_file)
+    raw_output_file.parent.mkdir(parents=True, exist_ok=True)
     temp_output_file = output_file.with_name(f"{output_file.name}.tmp")
+    temp_raw_output_file = raw_output_file.with_name(f"{raw_output_file.name}.tmp")
     if temp_output_file.exists():
         temp_output_file.unlink()
+    if temp_raw_output_file.exists():
+        temp_raw_output_file.unlink()
 
     zemax_length_unit = _current_zemax_length_unit(system)
     if progress_callback is not None:
@@ -1259,13 +1518,17 @@ def run_zemax_random_vibration_ray_trace(
     started = time.monotonic()
 
     try:
-        with zipfile.ZipFile(temp_output_file, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        with zipfile.ZipFile(temp_output_file, "w", compression=zipfile.ZIP_DEFLATED) as playback_archive, zipfile.ZipFile(
+            temp_raw_output_file,
+            "w",
+            compression=zipfile.ZIP_DEFLATED,
+        ) as raw_archive:
             for frame in frames:
                 if progress_callback is not None:
                     progress_callback(
                         {
                             "stage": "Zemax 随机振动追迹",
-                            "status": f"样本 {frame.frame_index}/{len(frames)}: 写入随机位姿",
+                            "status": f"样本 {frame.frame_index}/{len(frames)}: 写入随机位移/旋转",
                         }
                     )
                 matched, unmatched = _apply_pose_records_to_nce(
@@ -1304,26 +1567,38 @@ def run_zemax_random_vibration_ray_trace(
                 detector_result = _read_detector_result_grid(nce, detector_number, max_dimension=None)
                 frame_dir = f"frames/{frame.frame_index:04d}"
                 detector_csv_path = f"{frame_dir}/detector.csv"
+                detector_png_path = f"{frame_dir}/detector.png"
                 pose_json_path = f"{frame_dir}/pose.json"
                 if progress_callback is not None:
                     progress_callback(
                         {
                             "stage": "Zemax 随机振动追迹",
-                            "status": f"样本 {frame.frame_index}/{len(frames)}: 写入 ZZZ 数据",
+                            "status": f"样本 {frame.frame_index}/{len(frames)}: 分别写入快速播放PNG和MATLAB原始CSV",
                         }
                     )
-                archive.writestr(detector_csv_path, _grid_to_csv_text(detector_result["grid"]))
-                archive.writestr(
-                    pose_json_path,
-                    json.dumps(
-                        {
-                            "frame": frame.as_dict(),
-                            "matched": matched,
-                            "unmatched": unmatched,
-                        },
-                        ensure_ascii=False,
-                        indent=2,
+                raw_archive.writestr(detector_csv_path, _grid_to_csv_text(detector_result["grid"]))
+                playback_archive.writestr(
+                    detector_png_path,
+                    _false_color_png_bytes(
+                        detector_result["grid"],
+                        float(detector_result.get("min_value") or 0.0),
+                        float(detector_result.get("max_value") or 0.0),
+                        log_scale=True,
                     ),
+                )
+                pose_json_text = json.dumps(
+                    {
+                        "frame": frame.as_dict(),
+                        "matched": matched,
+                        "unmatched": unmatched,
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                )
+                playback_archive.writestr(pose_json_path, pose_json_text)
+                raw_archive.writestr(
+                    pose_json_path,
+                    pose_json_text,
                 )
                 summary = {key: value for key, value in detector_result.items() if key != "grid"}
                 frame_entries.append(
@@ -1332,17 +1607,23 @@ def run_zemax_random_vibration_ray_trace(
                         "time_value": frame.time_value,
                         "time_label": frame.time_label,
                         "set_index": frame.set_index,
-                        "detector_csv": detector_csv_path,
+                        "detector_png": detector_png_path,
+                        "detector_png_full_resolution": True,
+                        "raw_detector_csv": detector_csv_path,
+                        "raw_dts_file": str(raw_output_file),
                         "pose_json": pose_json_path,
                         "matched_count": len(matched),
                         "unmatched_count": len(unmatched),
+                        "imported_objects": _matched_import_object_summaries(matched),
                         "summary": summary,
                     }
                 )
 
             manifest = {
-                "schema": "ansys_zemax_random_vibration_detector_zzz_v1",
+                "schema": "ansys_zemax_random_vibration_detector_playback_dts_v1",
                 "created_at": datetime.now().isoformat(timespec="seconds"),
+                "file_role": "fast_playback_full_resolution_png",
+                "matlab_raw_file": str(raw_output_file),
                 "project_file": str(project_file),
                 "source_export_folder": str(export_folder),
                 "system_file": str(getattr(system, "SystemFile", "") or ""),
@@ -1362,17 +1643,41 @@ def run_zemax_random_vibration_ray_trace(
                     "logs": series.get("logs") or [],
                 },
                 "unmatched_by_frame": unmatched_by_frame,
-                "matlab": {
-                    "description": "This .zzz file is a ZIP container. In MATLAB: unzip('file.zzz','out'); manifest=jsondecode(fileread(fullfile('out','manifest.json'))); data=readmatrix(fullfile('out',manifest.frames(1).detector_csv));",
-                    "loader": "matlab/load_zzz_detector_series.m",
+                "playback": {
+                    "description": "Fast playback file. Frames contain full-resolution detector PNG images. MATLAB raw detector CSV data is saved in matlab_raw_file.",
+                    "full_resolution_png": True,
                 },
                 "elapsed_seconds": round(time.monotonic() - started, 3),
             }
-            archive.writestr("manifest.json", json.dumps(manifest, ensure_ascii=False, indent=2))
-            archive.writestr("matlab/load_zzz_detector_series.m", _matlab_zzz_loader_text())
+            raw_frame_entries = []
+            for frame_entry in frame_entries:
+                raw_entry = dict(frame_entry)
+                raw_entry.pop("detector_png", None)
+                raw_entry.pop("detector_png_full_resolution", None)
+                raw_entry.pop("raw_dts_file", None)
+                raw_entry["detector_csv"] = raw_entry.pop("raw_detector_csv", "")
+                raw_frame_entries.append(raw_entry)
+            raw_manifest = {
+                **manifest,
+                "schema": "ansys_zemax_random_vibration_detector_matlab_raw_dts_v1",
+                "file_role": "matlab_raw_detector_csv",
+                "playback_file": str(output_file),
+                "frames": raw_frame_entries,
+                "matlab": {
+                    "description": "This .dts file is a ZIP container. In MATLAB: unzip('file.dts','out'); manifest=jsondecode(fileread(fullfile('out','manifest.json'))); data=readmatrix(fullfile('out',manifest.frames(1).detector_csv));",
+                    "loader": "matlab/load_dts_detector_series.m",
+                },
+            }
+            raw_manifest.pop("playback", None)
+            playback_archive.writestr("manifest.json", json.dumps(manifest, ensure_ascii=False, indent=2))
+            raw_archive.writestr("manifest.json", json.dumps(raw_manifest, ensure_ascii=False, indent=2))
+            raw_archive.writestr("matlab/load_dts_detector_series.m", _matlab_dts_loader_text())
         if output_file.exists():
             output_file.unlink()
+        if raw_output_file.exists():
+            raw_output_file.unlink()
         temp_output_file.replace(output_file)
+        temp_raw_output_file.replace(raw_output_file)
     finally:
         try:
             ray_trace.Close()
@@ -1387,6 +1692,11 @@ def run_zemax_random_vibration_ray_trace(
                 temp_output_file.unlink()
             except Exception:
                 pass
+        if temp_raw_output_file.exists():
+            try:
+                temp_raw_output_file.unlink()
+            except Exception:
+                pass
 
     _mark_zosapi_session_dirty(application, system, False)
     return {
@@ -1395,6 +1705,8 @@ def run_zemax_random_vibration_ray_trace(
         "project_file": str(project_file),
         "source_export_folder": str(export_folder),
         "output_file": str(output_file),
+        "playback_file": str(output_file),
+        "raw_output_file": str(raw_output_file),
         "detector": detector,
         "frame_count": len(frame_entries),
         "frames": frame_entries,
@@ -1585,10 +1897,12 @@ def _calculate_lens_pose_from_components(
     has_coords = all("x" in node and "y" in node and "z" in node for node in merged_nodes)
     translation = _average_translation(merged_nodes)
     rotation_rad = (0.0, 0.0, 0.0)
+    rms_residual: float | None = None
     rotation_status = "not_computed"
     if has_coords:
-        rotation_rad = _fit_small_rotation(merged_nodes, translation)
-        rotation_status = "computed"
+        rotation_rad, rms_residual, rotation_status = _fit_rigid_body_rotation(
+            merged_nodes, translation
+        )
     else:
         logs.append(
             f"{label}: 已计算平均位移，但导出 TXT 没有节点原始坐标，"
@@ -1607,17 +1921,21 @@ def _calculate_lens_pose_from_components(
         source=", ".join(source_files),
         displacement_unit="m",
         rotation_unit="deg",
+        rms_residual=rms_residual,
     )
     all_record = {
         **record.as_dict(),
         "node_count": len(merged_nodes),
         "rotation_status": rotation_status,
     }
+    residual_text = (
+        f"; 面形残差RMS={rms_residual:.3g} m" if rms_residual is not None else ""
+    )
     logs.append(
-        f"{label}: 节点 {len(merged_nodes)} 个，平均位移 "
-        f"X={record.x:.6g}, Y={record.y:.6g}, Z={record.z:.6g}; "
-        f"旋转 Rx={record.rx:.6g} deg, Ry={record.ry:.6g} deg, Rz={record.rz:.6g} deg "
-        f"({rotation_status}); 位移单位={record.displacement_unit}"
+        f"{label}: 节点 {len(merged_nodes)} 个，质心平移(偏心/离焦) "
+        f"X={record.x:.6g}, Y={record.y:.6g}, Z={record.z:.6g} m; "
+        f"倾斜 Rx={record.rx:.6g}, Ry={record.ry:.6g}, Rz={record.rz:.6g} deg "
+        f"({rotation_status}){residual_text}"
     )
     return record, all_record
 
@@ -1690,6 +2008,73 @@ def _average_translation(nodes: list[dict[str, float]]) -> tuple[float, float, f
         sum(node["uy"] for node in nodes) / count,
         sum(node["uz"] for node in nodes) / count,
     )
+
+
+def _fit_rigid_body_rotation(
+    nodes: list[dict[str, float]],
+    translation: tuple[float, float, float],
+) -> tuple[tuple[float, float, float], float | None, str]:
+    """用 SVD/Kabsch 严格刚体配准拟合绕质心的旋转。
+
+    返回 ``(旋转向量[rad], 面形残差RMS[m] 或 None, 状态)``:
+
+    - 平移沿用质心位移(节点位移均值,见 :func:`_average_translation`),即光学偏心/离焦;
+      旋转以质心为中心,用旋转矩阵的对数映射(log map)表示为旋转向量,小角度时与各轴小转角一致。
+    - 残差RMS 为去除最佳刚体平移+旋转后各节点的剩余位移 RMS,表征非刚体面形误差。
+    - Kabsch 解带反射保护(det 修正),保证得到正交旋转(det=+1)而非镜像。
+    - ``numpy`` 不可用或求解失败时回退到线性化小角度最小二乘解,状态记为 ``computed_small_angle``。
+    """
+
+    if _np is None:
+        return _fit_small_rotation(nodes, translation), None, "computed_small_angle"
+    try:
+        p = _np.asarray([[n["x"], n["y"], n["z"]] for n in nodes], dtype=float)
+        u = _np.asarray([[n["ux"], n["uy"], n["uz"]] for n in nodes], dtype=float)
+        if p.shape[0] < 3:
+            # 少于 3 个非共线点无法唯一确定旋转,回退小角度近似
+            return _fit_small_rotation(nodes, translation), None, "computed_small_angle"
+        q = p + u
+        centroid_p = p.mean(axis=0)
+        centroid_q = q.mean(axis=0)
+        p_centered = p - centroid_p
+        q_centered = q - centroid_q
+        covariance = p_centered.T @ q_centered
+        u_svd, _s, vt = _np.linalg.svd(covariance)
+        reflection = 1.0 if _np.linalg.det(vt.T @ u_svd.T) >= 0.0 else -1.0
+        rotation = vt.T @ _np.diag([1.0, 1.0, reflection]) @ u_svd.T
+        rotvec = _rotation_matrix_to_rotation_vector(rotation)
+        residual = q_centered - p_centered @ rotation.T
+        rms = float(_np.sqrt((residual ** 2).sum(axis=1).mean()))
+        return (
+            (float(rotvec[0]), float(rotvec[1]), float(rotvec[2])),
+            rms,
+            "computed_kabsch",
+        )
+    except Exception:
+        # 任何数值异常都安全回退到纯 Python 小角度解
+        return _fit_small_rotation(nodes, translation), None, "computed_small_angle"
+
+
+def _rotation_matrix_to_rotation_vector(rotation: "Any") -> "Any":
+    """旋转矩阵 -> 旋转向量(轴 * 角,rad)。小角度时等于反对称部分。"""
+
+    cos_theta = max(-1.0, min(1.0, (float(_np.trace(rotation)) - 1.0) / 2.0))
+    theta = math.acos(cos_theta)
+    antisymmetric = _np.array([
+        rotation[2, 1] - rotation[1, 2],
+        rotation[0, 2] - rotation[2, 0],
+        rotation[1, 0] - rotation[0, 1],
+    ])
+    if theta < 1e-9:
+        # 极小转角:log map 退化为反对称部分的一半
+        return antisymmetric / 2.0
+    axis_norm = float(_np.linalg.norm(antisymmetric))
+    if axis_norm < 1e-12:
+        # theta 接近 pi 的退化情形,从 (R + I)/2 的主对角提取轴
+        diagonal = _np.clip((_np.diag(rotation) + 1.0) / 2.0, 0.0, 1.0)
+        axis = _np.sqrt(diagonal)
+        return axis * theta
+    return antisymmetric / axis_norm * theta
 
 
 def _fit_small_rotation(
@@ -1770,6 +2155,7 @@ def _save_pose_calculation(
         "rx",
         "ry",
         "rz",
+        "rms_residual",
         "displacement_unit",
         "rotation_unit",
         "node_count",
@@ -1815,6 +2201,7 @@ def _save_pose_time_series_calculation(
         "rx",
         "ry",
         "rz",
+        "rms_residual",
         "displacement_unit",
         "rotation_unit",
         "node_count",
@@ -2106,11 +2493,7 @@ def _find_zmx_nsc_object_blocks(lines: list[str]) -> list[dict[str, object]]:
 
 def _match_object_blocks(name: str, blocks: list[dict[str, object]]) -> list[dict[str, object]]:
     target = _normalize_name(name)
-    exact = [block for block in blocks if _normalize_name(str(block.get("comment") or "")) == target]
-    if exact:
-        return exact
-    suffix = [block for block in blocks if _normalize_name(str(block.get("comment") or "")).endswith(target)]
-    return suffix
+    return [block for block in blocks if _normalize_name(str(block.get("comment") or "")) == target]
 
 
 def _pose_baseline_path(project_file: Path) -> Path:
@@ -2489,7 +2872,7 @@ def _load_zosapi() -> object:
             "请用包含 pythonnet 的环境启动软件，例如 D:\\anaconda\\envs\\zemax310\\python.exe。"
         ) from exc
 
-    opticstudio_dir = require_file(OPTICSTUDIO_EXE, "OpticStudio executable").parent
+    opticstudio_dir = require_file(app_config.OPTICSTUDIO_EXE, "OpticStudio executable").parent
     net_helper_candidates = [
         opticstudio_dir / "ZOSAPI_NetHelper.dll",
         opticstudio_dir / "ZemaxData" / "ZOS-API" / "Libraries" / "ZOSAPI_NetHelper.dll",
@@ -2630,6 +3013,32 @@ def _apply_pose_records_to_nce(
     return matched, unmatched
 
 
+def _matched_import_object_summaries(matched: list[dict[str, object]]) -> list[dict[str, object]]:
+    summaries: list[dict[str, object]] = []
+    seen: set[tuple[int, str, str]] = set()
+    for item in matched:
+        try:
+            object_index = int(item.get("object_index") or 0)
+        except (TypeError, ValueError):
+            object_index = 0
+        comment = str(item.get("comment") or "").strip()
+        source_name = str(item.get("name") or "").strip()
+        display_name = comment or source_name
+        key = (object_index, display_name, source_name)
+        if key in seen:
+            continue
+        seen.add(key)
+        summaries.append(
+            {
+                "object_index": object_index,
+                "name": display_name,
+                "comment": comment,
+                "source_name": source_name,
+            }
+        )
+    return summaries
+
+
 def _restore_nce_pose_baseline(object_rows: list[dict[str, object]], baseline: dict[str, object]) -> None:
     for item in object_rows:
         obj = item.get("object")
@@ -2746,24 +3155,23 @@ def _export_detector_result(
     output_dir: Path,
     *,
     log_scale: bool,
-    write_csv: bool,
-    preview_max_dimension: int | None,
+    export_matlab: bool,
 ) -> dict[str, object]:
     detector_number = int(detector.get("object_index") or 0)
     if detector_number <= 0:
         raise ValueError(f"无效探测器编号: {detector_number}")
 
     read_started = time.monotonic()
-    grid_max_dimension = None if write_csv else preview_max_dimension
-    detector_result = _read_detector_result_grid(nce, detector_number, max_dimension=grid_max_dimension)
+    # 快速查看与完整导出现在都读全分辨率矩阵;两者区别仅在于是否落盘 .mat 文件。
+    detector_result = _read_detector_result_grid(nce, detector_number, max_dimension=None)
     read_seconds = time.monotonic() - read_started
     base_name = _detector_result_base_name(project_file, detector, detector_number)
     png_path = output_dir / f"{base_name}.png"
     write_started = time.monotonic()
-    csv_path: Path | None = None
-    if write_csv:
-        csv_path = output_dir / f"{base_name}.csv"
-        _write_detector_grid_csv(csv_path, detector_result["grid"])
+    mat_path: Path | None = None
+    if export_matlab:
+        mat_path = output_dir / f"{base_name}.mat"
+        _write_detector_grid_mat(mat_path, detector_result, detector)
     image_grid = _downsample_grid_for_preview(
         detector_result["grid"],
         DETECTOR_PREVIEW_MAX_DIMENSION,
@@ -2780,9 +3188,9 @@ def _export_detector_result(
         "detector": detector,
         "status": "ok",
         "summary": {key: value for key, value in detector_result.items() if key != "grid"},
-        "csv_path": str(csv_path) if csv_path is not None else "",
+        "mat_path": str(mat_path) if mat_path is not None else "",
         "image_path": str(png_path),
-        "read_mode": "full_csv_export" if write_csv else "fast_preview",
+        "read_mode": "full_matlab_export" if export_matlab else "full_read",
         "preview_image_max_dimension": DETECTOR_PREVIEW_MAX_DIMENSION,
         "timings": {
             "read_seconds": round(read_seconds, 3),
@@ -2959,6 +3367,59 @@ def _write_detector_grid_csv(path: Path, grid: list[list[float]]) -> None:
             writer.writerow([f"{float(value):.12g}" for value in row])
 
 
+def _write_detector_grid_mat(
+    path: Path,
+    detector_result: dict[str, object],
+    detector: dict[str, object],
+) -> None:
+    """把全分辨率探测器矩阵 + 摘要写成 MATLAB .mat 二进制文件。
+
+    MATLAB 中 ``load('xxx.mat')`` 即得到:
+    - ``detector``      : y×x 的双精度通量矩阵(行=Y 像素,列=X 像素,与 CSV 行序一致);
+    - ``detector_info`` : 含探测器编号、注释、像素尺寸、总通量、质心等的结构体。
+    """
+    if _np is None:
+        raise RuntimeError("导出 MATLAB .mat 需要 numpy,但当前环境未安装 numpy(pip install numpy)。")
+    try:
+        from scipy.io import savemat
+    except Exception as exc:  # pragma: no cover - 仅在缺少 scipy 的环境触发
+        raise RuntimeError(
+            "导出 MATLAB .mat 需要 scipy,但当前环境未安装 scipy(pip install scipy)。"
+        ) from exc
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    grid = detector_result.get("grid") or []
+    array = _np.asarray(grid, dtype=float)
+    if array.ndim != 2:
+        array = array.reshape((len(grid), -1)) if grid else _np.zeros((0, 0), dtype=float)
+
+    def _num(value: object, default: float = 0.0) -> float:
+        try:
+            return float(value)  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            return default
+
+    centroid_x = detector_result.get("centroid_x_pixel")
+    centroid_y = detector_result.get("centroid_y_pixel")
+    info = {
+        "object_index": int(_num(detector.get("object_index"))),
+        "comment": str(detector.get("comment") or ""),
+        "type_name": str(detector.get("type_name") or ""),
+        "x_pixels": int(_num(detector_result.get("x_pixels"), array.shape[1] if array.ndim == 2 else 0)),
+        "y_pixels": int(_num(detector_result.get("y_pixels"), array.shape[0] if array.ndim == 2 else 0)),
+        "total_flux": _num(detector_result.get("total_flux")),
+        "total_hits": _num(detector_result.get("total_hits")),
+        "std_dev": _num(detector_result.get("std_dev")),
+        "grid_sum": _num(detector_result.get("grid_sum")),
+        "min_value": _num(detector_result.get("min_value")),
+        "max_value": _num(detector_result.get("max_value")),
+        "nonzero_pixels": int(_num(detector_result.get("nonzero_pixels"))),
+        "centroid_x_pixel": _num(centroid_x, float("nan")) if centroid_x is not None else float("nan"),
+        "centroid_y_pixel": _num(centroid_y, float("nan")) if centroid_y is not None else float("nan"),
+    }
+    savemat(str(path), {"detector": array, "detector_info": info}, do_compression=True)
+
+
 def _grid_to_csv_text(grid: list[list[float]]) -> str:
     stream = io.StringIO()
     writer = csv.writer(stream, lineterminator="\n")
@@ -2967,13 +3428,59 @@ def _grid_to_csv_text(grid: list[list[float]]) -> str:
     return stream.getvalue()
 
 
-def _matlab_zzz_loader_text() -> str:
-    return """function series = load_zzz_detector_series(zzzFile, outputFolder)
-%LOAD_ZZZ_DETECTOR_SERIES Read Windows端 Zemax transient detector .zzz files.
-%   series = load_zzz_detector_series('result.zzz') unzips the custom .zzz
+def _false_color_png_bytes(
+    grid: list[list[float]],
+    min_value: float,
+    max_value: float,
+    *,
+    log_scale: bool,
+) -> bytes:
+    if not grid or not grid[0]:
+        raise RuntimeError("探测器像素矩阵为空，无法生成伪彩色图。")
+    from PySide6.QtCore import QByteArray, QBuffer, QIODevice
+    from PySide6.QtGui import QImage, qRgb
+
+    height = len(grid)
+    width = len(grid[0])
+    image = QImage(width, height, QImage.Format_RGB32)
+    if max_value <= min_value:
+        scale_denominator = 1.0
+    elif log_scale:
+        scale_denominator = math.log1p(max_value - min_value)
+    else:
+        scale_denominator = max_value - min_value
+
+    for y_index, row in enumerate(grid):
+        image_y = height - 1 - y_index
+        for x_index, value in enumerate(row):
+            value = float(value)
+            if max_value <= min_value:
+                normalized = 0.0
+            elif log_scale:
+                normalized = math.log1p(max(0.0, value - min_value)) / scale_denominator
+            else:
+                normalized = (value - min_value) / scale_denominator
+            red, green, blue = _false_color_rgb(normalized)
+            image.setPixel(x_index, image_y, qRgb(red, green, blue))
+
+    data = QByteArray()
+    buffer = QBuffer(data)
+    buffer.open(QIODevice.WriteOnly)
+    try:
+        if not image.save(buffer, "PNG"):
+            raise RuntimeError("伪彩色 PNG 编码失败。")
+        return bytes(data)
+    finally:
+        buffer.close()
+
+
+def _matlab_dts_loader_text() -> str:
+    return """function series = load_dts_detector_series(dtsFile, outputFolder)
+%LOAD_DTS_DETECTOR_SERIES Read Ansys-Zemax STOP transient detector .dts files.
+%   series = load_dts_detector_series('result.dts') unzips the custom .dts
 %   container, reads manifest.json, and loads each detector CSV matrix.
 %
-%   The .zzz file is a ZIP container with:
+%   The .dts file is a ZIP container with:
 %     manifest.json
 %     frames/0001/detector.csv
 %     frames/0001/pose.json
@@ -2981,7 +3488,7 @@ def _matlab_zzz_loader_text() -> str:
 %   MATLAB R2016b+ jsondecode is required.
 
 if nargin < 2 || isempty(outputFolder)
-    [parentFolder, baseName, ~] = fileparts(zzzFile);
+    [parentFolder, baseName, ~] = fileparts(dtsFile);
     if isempty(parentFolder)
         parentFolder = pwd;
     end
@@ -2990,7 +3497,7 @@ end
 if ~exist(outputFolder, 'dir')
     mkdir(outputFolder);
 end
-unzip(zzzFile, outputFolder);
+unzip(dtsFile, outputFolder);
 manifestText = fileread(fullfile(outputFolder, 'manifest.json'));
 manifest = jsondecode(manifestText);
 frameCount = numel(manifest.frames);
@@ -3084,10 +3591,7 @@ def _false_color_rgb(value: float) -> tuple[int, int, int]:
 
 def _match_nce_objects(name: str, rows: list[dict[str, object]]) -> list[dict[str, object]]:
     target = _normalize_name(name)
-    exact = [row for row in rows if _normalize_name(str(row.get("comment") or "")) == target]
-    if exact:
-        return exact
-    return [row for row in rows if _normalize_name(str(row.get("comment") or "")).endswith(target)]
+    return [row for row in rows if _normalize_name(str(row.get("comment") or "")) == target]
 
 
 def _parse_nsop_line(line: str) -> dict[str, object] | None:

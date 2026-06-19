@@ -13,7 +13,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from xml.etree import ElementTree
 
-from .config import DEFAULT_OPEN_JOURNAL, PROJECT_FILE, RUNWB2, WORKSPACE, require_file
+from . import config as app_config
+from .config import DEFAULT_OPEN_JOURNAL, PROJECT_FILE, WORKSPACE, require_file
 
 
 _WORKBENCH_REF_RE = re.compile(r"\$\$[0-9a-fA-F-]+")
@@ -1742,7 +1743,7 @@ def _run_workbench_journal_with_progress(
     progress_path: Path,
     progress_callback=None,
 ) -> subprocess.CompletedProcess[str]:
-    runwb2 = require_file(RUNWB2, "RunWB2")
+    runwb2 = require_file(app_config.RUNWB2, "RunWB2")
     cmd = [
         str(runwb2),
         "-B",
@@ -2606,7 +2607,7 @@ def run_workbench_journal(
     check: bool = True,
 ) -> subprocess.CompletedProcess[str]:
     """Run a Workbench journal against a Workbench project."""
-    runwb2 = require_file(RUNWB2, "RunWB2")
+    runwb2 = require_file(app_config.RUNWB2, "RunWB2")
     project = require_file(_project_or_default(project_file), "Workbench project")
     journal = require_file(Path(journal_path), "Workbench journal")
 
@@ -2644,7 +2645,7 @@ def open_mechanical_project(
     project_file: str | Path | None = None,
 ) -> subprocess.Popen:
     """Open a Workbench project in the Mechanical UI."""
-    runwb2 = require_file(RUNWB2, "RunWB2")
+    runwb2 = require_file(app_config.RUNWB2, "RunWB2")
     project = require_file(_project_or_default(project_file), "Workbench project")
     journal = Path(journal_path) if journal_path else DEFAULT_OPEN_JOURNAL
 
@@ -2665,7 +2666,7 @@ def open_workbench_mechanical(
     This intentionally opens Workbench first and then calls the selected
     system's Model.Edit(), so Mechanical keeps the Workbench project context.
     """
-    runwb2 = require_file(RUNWB2, "RunWB2")
+    runwb2 = require_file(app_config.RUNWB2, "RunWB2")
     project = require_file(_project_or_default(project_file), "Workbench project")
     if not system_name:
         raise ValueError("A Workbench system name is required.")
