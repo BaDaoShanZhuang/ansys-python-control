@@ -13,3 +13,5 @@ release/
 .idea/
 *.egg-info/
 tools/downloads/
+~$*
+*.docx.tmp
