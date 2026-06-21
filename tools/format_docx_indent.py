@@ -31,6 +31,18 @@ IND_FULL = '<w:ind w:firstLineChars="200"/>'   # 2 字符首行缩进
 JC_BOTH = '<w:jc w:val="both"/>'                # 两端对齐
 IND_ZERO = '<w:ind w:firstLineChars="0"/>'      # 取消首行缩进
 
+# 表格全网格边框(所有横线 + 竖线;sz=4 即 0.5pt,color=auto 即黑)
+TBL_BORDERS = (
+    '<w:tblBorders>'
+    '<w:top w:val="single" w:sz="4" w:space="0" w:color="auto"/>'
+    '<w:left w:val="single" w:sz="4" w:space="0" w:color="auto"/>'
+    '<w:bottom w:val="single" w:sz="4" w:space="0" w:color="auto"/>'
+    '<w:right w:val="single" w:sz="4" w:space="0" w:color="auto"/>'
+    '<w:insideH w:val="single" w:sz="4" w:space="0" w:color="auto"/>'
+    '<w:insideV w:val="single" w:sz="4" w:space="0" w:color="auto"/>'
+    '</w:tblBorders>'
+)
+
 
 def _style_block(xml: str, style_id: str) -> tuple[int, int, str]:
     """返回指定 styleId 的 <w:style>...</w:style> 块 (起, 止, 文本)。"""
@@ -56,16 +68,19 @@ def _inject_into_pPr(block: str, insert: str) -> str:
 
 
 def patch_styles_xml(xml: str) -> str:
+    """段落样式:正文缩进/两端对齐。幂等(已套则跳过,可重复运行)。"""
     # 1) BodyText:首行缩进 2 字符 + 两端对齐(ind 必须在 jc 前)
     try:
         s, e, blk = _style_block(xml, 'BodyText')
-        xml = xml[:s] + _inject_into_pPr(blk, IND_FULL + JC_BOTH) + xml[e:]
+        if 'firstLineChars' not in blk:
+            xml = xml[:s] + _inject_into_pPr(blk, IND_FULL + JC_BOTH) + xml[e:]
     except KeyError:
         print('  [警告] 无 BodyText 样式,跳过(请确认用当前 pandoc 重渲染)')
     # 2) Compact(列表项):取消首行缩进
     try:
         s, e, blk = _style_block(xml, 'Compact')
-        xml = xml[:s] + _inject_into_pPr(blk, IND_ZERO) + xml[e:]
+        if 'firstLineChars' not in blk:
+            xml = xml[:s] + _inject_into_pPr(blk, IND_ZERO) + xml[e:]
     except KeyError:
         pass
     # 3) BlockText(引用块):给已有 <w:ind ...> 补 firstLineChars="0"
@@ -81,23 +96,49 @@ def patch_styles_xml(xml: str) -> str:
     return xml
 
 
+def patch_table_borders(document_xml: str) -> str:
+    """给每个表格的 tblPr 直接注入全网格边框(所有横线+竖线)。幂等。
+
+    直接格式(而非表样式)保证一定渲染。tblBorders 按 schema 排在
+    tblLayout 之前;若无 tblLayout 则插到 </w:tblPr> 前。
+    """
+    def repl(m: re.Match) -> str:
+        block = m.group(0)
+        if '<w:tblBorders>' in block:
+            return block
+        if '<w:tblLayout' in block:
+            return block.replace('<w:tblLayout', TBL_BORDERS + '<w:tblLayout', 1)
+        return block.replace('</w:tblPr>', TBL_BORDERS + '</w:tblPr>', 1)
+
+    return re.sub(r'<w:tblPr>.*?</w:tblPr>', repl, document_xml, flags=re.S)
+
+
 def process(path: Path) -> None:
     tmp = path.with_suffix('.docx.tmp')
     with zipfile.ZipFile(path) as zin:
         names = zin.namelist()
-        styles = zin.read('word/styles.xml').decode('utf-8')
-        new_styles = patch_styles_xml(styles)
+        new_styles = patch_styles_xml(zin.read('word/styles.xml').decode('utf-8'))
+        new_document = patch_table_borders(zin.read('word/document.xml').decode('utf-8'))
         with zipfile.ZipFile(tmp, 'w', zipfile.ZIP_DEFLATED) as zout:
             for n in names:
-                data = new_styles.encode('utf-8') if n == 'word/styles.xml' else zin.read(n)
+                if n == 'word/styles.xml':
+                    data = new_styles.encode('utf-8')
+                elif n == 'word/document.xml':
+                    data = new_document.encode('utf-8')
+                else:
+                    data = zin.read(n)
                 zout.writestr(zin.getinfo(n), data)
     shutil.move(str(tmp), str(path))
     # 校验
     with zipfile.ZipFile(path) as z:
         sx = z.read('word/styles.xml').decode('utf-8')
+        dx = z.read('word/document.xml').decode('utf-8')
     _, _, bt = _style_block(sx, 'BodyText')
-    ok = ('firstLineChars="200"' in bt) and ('w:val="both"' in bt)
-    print(f'[{"OK" if ok else "??"}] {path.name}  (BodyText 含 缩进200+两端对齐: {ok})')
+    indent_ok = ('firstLineChars="200"' in bt) and ('w:val="both"' in bt)
+    n_tbl = dx.count('<w:tbl>')
+    n_bordered = dx.count('<w:tblBorders>')
+    print(f'[{"OK" if indent_ok and n_bordered >= n_tbl else "??"}] {path.name}  '
+          f'(缩进+两端对齐: {indent_ok}; 表格 {n_bordered}/{n_tbl} 已加全边框)')
 
 
 def main() -> int:
